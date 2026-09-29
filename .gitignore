@@ -1,0 +1,11 @@
+/native/target/
+/imagej-plugin/target/
+*.dll
+*.so
+*.dylib
+*.pdb
+.DS_Store
+.idea/
+.vscode/
+/.tools/
+/dist/

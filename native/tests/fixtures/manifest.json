@@ -1,0 +1,32 @@
+{
+  "rdl1_reference_v1.rdlt": {
+    "sha256": "27b9e8aa23ce221400f892b71ffa6da6045ba21a97c371b441decd969c1e8175",
+    "dims": {
+      "x": 7,
+      "y": 5,
+      "z": 3
+    },
+    "options": {
+      "block_depth": 2,
+      "context_mode": "Mean",
+      "scale_bits": 10
+    },
+    "generator": "Radelta Rust API with block_depth=2 and default context/precision"
+  },
+  "rdm2_reference_v1.rdlt": {
+    "sha256": "1f9ddd9c5d3139e73b961afb3d40dde7b9092336407f42e8deb75c6d45fc6e5d",
+    "dims": {
+      "x": 5,
+      "y": 4,
+      "z": 3,
+      "c": 2,
+      "t": 2
+    },
+    "options": {
+      "block_depth": 2,
+      "context_mode": "Mean",
+      "scale_bits": 10
+    },
+    "generator": "Radelta Rust API with block_depth=2 and default context/precision"
+  }
+}

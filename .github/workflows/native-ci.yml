@@ -1,0 +1,77 @@
+name: native-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  metadata:
+    name: Release metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: python scripts/check_release_metadata.py
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        working-directory: native
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - name: Formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --all-targets
+      - name: Release tests
+        run: cargo test --release
+      - name: Release build
+        run: cargo build --release
+
+  imagej:
+    name: ImageJ (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            library: libradelta_native.so
+          - os: windows-latest
+            library: radelta_native.dll
+          - os: macos-latest
+            library: libradelta_native.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Build native library for plugin tests
+        run: cargo build --release --manifest-path native/Cargo.toml
+      - name: Build and test plugin
+        env:
+          RADELTA_NATIVE_LIBRARY: ${{ github.workspace }}/native/target/release/${{ matrix.library }}
+        working-directory: imagej-plugin
+        run: mvn --batch-mode package

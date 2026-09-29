@@ -1,0 +1,32 @@
+[package]
+name = "radelta"
+version = "0.5.0"
+edition = "2021"
+description = "High-throughput lossless and calibrated-lossy uint16 multidimensional image codec"
+license = "BSD-3-Clause"
+readme = "README.md"
+
+[lib]
+# Internal Cargo target name. Release packaging stages this cdylib under the
+# platform convention: radelta.dll (Windows), libradelta.so (Linux), or
+# libradelta.dylib (macOS). Keeping the Cargo target distinct from the CLI
+# avoids the Windows radelta.pdb filename collision.
+name = "radelta_native"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "radelta"
+path = "src/main.rs"
+
+[dependencies]
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+rayon = "1"
+crc32fast = "1"
+tiff = "0.11"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Match the test harness's panic strategy so release tests and the CLI share
+# one library build. Mixed strategies collide on the native DLL on Windows.
+panic = "unwind"
