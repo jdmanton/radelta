@@ -17,11 +17,13 @@ public class OpenRadeltaPlugin implements PlugIn {
 
         try {
             ImagePlus shown = RadeltaImageFactory.openForDisplay(path);
+            if (shown == null) return;
             shown.show();
             IJ.showStatus("Radelta: " + shown.getWidth() + "x" + shown.getHeight() +
                     ", C=" + shown.getNChannels() + ", Z=" + shown.getNSlices() +
                     ", T=" + shown.getNFrames() +
-                    ("true".equals(shown.getProperty("Radelta.Lossy")) ? " (lossy)" : " (lossless)"));
+                    ("true".equals(shown.getProperty("Radelta.Lossy")) ? " (lossy)" : " (lossless)") +
+                    ", " + shown.getProperty("Radelta.OpenMode"));
         } catch (Throwable e) {
             IJ.handleException(e);
         }

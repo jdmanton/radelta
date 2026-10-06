@@ -149,6 +149,18 @@ Large datasets can be written in a bounded-memory streaming form. ImageJ opens t
 
 The plugin can open `.rdlt` / `.radelta` files and export datasets using either lossless or calibrated-lossy compression.
 
+Opening from the Radelta menu, File > Open, or drag-and-drop offers a choice
+between a virtual stack (the default) and loading the entire dataset into RAM.
+The dialog shows the dataset dimensions, format, minimum 16-bit pixel storage,
+Java heap limit, and approximate unused heap. Full loading reports progress and
+closes the source file once complete; virtual loading decodes planes on demand.
+Both modes restore the stored metadata. The memory estimate excludes Java/ImageJ
+and native decoding overhead.
+
+Headless opening defaults to a virtual stack. Scripts can explicitly select a
+mode with `RadeltaImageFactory.openForDisplay(path, loadIntoMemory)`;
+`openBase(path)` remains a non-interactive virtual-stack reader.
+
 Exports preserve spatial, temporal, and intensity calibration, image titles,
 slice labels, and string, numeric, Boolean, and byte-array properties. Original
 opaque metadata is retained when a Radelta file is edited and resaved. TIFF

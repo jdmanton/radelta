@@ -42,8 +42,9 @@ public class RadeltaIOPlugin extends AbstractIOPlugin<Object> {
         if (!supportsOpen(source)) return null;
 
         final ImagePlus imp = RadeltaImageFactory.openForDisplay(source);
-        imp.show();
+        if (imp != null) imp.show();
 
+        // Cancellation is also handled: do not fall through to another reader.
         // DefaultLegacyOpener interprets any non-null result as handled.  The
         // ImagePlus has already been shown deliberately, because its generic
         // handler only auto-displays ImageJ2 Dataset objects.

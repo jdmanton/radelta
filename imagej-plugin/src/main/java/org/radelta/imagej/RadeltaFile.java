@@ -5,6 +5,7 @@ import com.sun.jna.ptr.PointerByReference;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.math.BigInteger;
 
 final class RadeltaFile implements Closeable {
     private Pointer handle;
@@ -25,8 +26,9 @@ final class RadeltaFile implements Closeable {
         this.streaming = (flags & RadeltaNative.FLAG_STREAMING) != 0;
         long plane = (long) width * (long) height;
         if (plane > Integer.MAX_VALUE) throw new IOException("A single Radelta plane exceeds Java array limits");
-        long planes = (long) slices * channels * frames;
-        if (planes > Integer.MAX_VALUE) throw new IOException("Radelta stack contains too many planes for ImageJ 1.x indexing");
+        BigInteger planes = BigInteger.valueOf(slices).multiply(BigInteger.valueOf(channels))
+                .multiply(BigInteger.valueOf(frames));
+        if (planes.compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0) throw new IOException("Radelta stack contains too many planes for ImageJ 1.x indexing");
     }
 
     static RadeltaFile open(String path) throws IOException {
@@ -79,6 +81,15 @@ final class RadeltaFile implements Closeable {
 
     int planeCount() {
         return Math.multiplyExact(Math.multiplyExact(channels, slices), frames);
+    }
+
+    BigInteger pixelBytesBig() {
+        return BigInteger.valueOf(width)
+                .multiply(BigInteger.valueOf(height))
+                .multiply(BigInteger.valueOf(slices))
+                .multiply(BigInteger.valueOf(channels))
+                .multiply(BigInteger.valueOf(frames))
+                .multiply(BigInteger.valueOf(2L));
     }
 
     @Override

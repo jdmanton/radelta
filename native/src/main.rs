@@ -1103,6 +1103,8 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
     let description = dec.get_tag_ascii_string(Tag::ImageDescription).ok();
 
     let mut physical_pages = 1usize;
+    let scan_start = Instant::now();
+    let mut last_scan_report = Instant::now();
     while dec.more_images() {
         dec.next_image().map_err(|e| e.to_string())?;
         let (ww, hh) = dec.dimensions().map_err(|e| e.to_string())?;
@@ -1112,6 +1114,21 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
             );
         }
         physical_pages += 1;
+        if last_scan_report.elapsed().as_secs_f64() >= 2.0 {
+            eprintln!(
+                "Scanning TIFF directories: {} physical pages found ({:.1} s elapsed)...",
+                physical_pages,
+                scan_start.elapsed().as_secs_f64()
+            );
+            last_scan_report = Instant::now();
+        }
+    }
+    if scan_start.elapsed().as_secs_f64() >= 2.0 {
+        eprintln!(
+            "TIFF directory scan complete: {} physical pages in {:.1} s.",
+            physical_pages,
+            scan_start.elapsed().as_secs_f64()
+        );
     }
 
     let mut logical_pages = physical_pages;
@@ -1207,8 +1224,8 @@ fn encode_streaming_lossless(
     output: &Path,
     opts: Options,
     ds: &DatasetArgs,
+    info: &StreamingDataset,
 ) -> Result<(), String> {
-    let info = inspect_streaming_dataset(input, ds)?;
     let d = info.layout.dims;
     let block_depth = if opts.block_depth == 0 {
         DEFAULT_BLOCK_DEPTH
@@ -1223,12 +1240,21 @@ fn encode_streaming_lossless(
         .and_then(|v| v.checked_mul(chunks_per_volume as u64))
         .ok_or("chunk count overflow")?;
 
-    let mut planes = PlaneReader::open(input, &info)?;
+    let mut planes = PlaneReader::open(input, info)?;
     let file = File::create(output).map_err(|e| e.to_string())?;
     let mut out = BufWriter::new(file);
     stream_header(&mut out, STREAM_MAGIC_LOSSLESS, d, chunk_z, chunk_count)?;
+    out.flush().map_err(|e| e.to_string())?;
+
+    println!(
+        "Streaming layout: {} chunk(s), up to {} Z plane(s) per chunk; input has {} physical / {} logical TIFF plane(s).",
+        chunk_count, chunk_z, info.physical_pages, info.logical_pages
+    );
+    println!("Reading first chunk...");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
 
     let start = Instant::now();
+    let mut last_progress = Instant::now();
     let mut raw_bytes = 0usize;
     let mut payload_bytes = 0usize;
     let mut chunks_written = 0u64;
@@ -1267,11 +1293,28 @@ fn encode_streaming_lossless(
                 raw_bytes += chunk.len() * 2;
                 payload_bytes += payload.len();
                 chunks_written += 1;
+                if last_progress.elapsed().as_secs_f64() >= 1.0 || chunks_written == chunk_count {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let pct = 100.0 * chunks_written as f64 / chunk_count.max(1) as f64;
+                    println!(
+                        "  chunk {}/{} ({:.1}%)  raw {:.3} GiB  elapsed {:.1} s  {:.3} GB/s including TIFF I/O",
+                        chunks_written,
+                        chunk_count,
+                        pct,
+                        raw_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                        elapsed,
+                        gb_per_s(raw_bytes, elapsed)
+                    );
+                    std::io::stdout().flush().map_err(|e| e.to_string())?;
+                    last_progress = Instant::now();
+                }
                 z0 += depth;
             }
         }
     }
     out.flush().map_err(|e| e.to_string())?;
+    println!("Saving TIFF metadata...");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
     let metadata = tiff_metadata::capture(input, &info.layout)?;
     radelta_native::set_file_metadata(output, &metadata).map_err(|e| e.to_string())?;
     let total = fs::metadata(output).map_err(|e| e.to_string())?.len() as usize;
@@ -1303,8 +1346,8 @@ fn encode_streaming_lossy(
     output: &Path,
     opts: LossyOptions,
     ds: &DatasetArgs,
+    info: &StreamingDataset,
 ) -> Result<(), String> {
-    let info = inspect_streaming_dataset(input, ds)?;
     let d = info.layout.dims;
     let block_depth = if opts.block_depth == 0 {
         DEFAULT_BLOCK_DEPTH
@@ -1319,12 +1362,21 @@ fn encode_streaming_lossy(
         .and_then(|v| v.checked_mul(chunks_per_volume as u64))
         .ok_or("chunk count overflow")?;
 
-    let mut planes = PlaneReader::open(input, &info)?;
+    let mut planes = PlaneReader::open(input, info)?;
     let file = File::create(output).map_err(|e| e.to_string())?;
     let mut out = BufWriter::new(file);
     stream_header(&mut out, STREAM_MAGIC_LOSSY, d, chunk_z, chunk_count)?;
+    out.flush().map_err(|e| e.to_string())?;
+
+    println!(
+        "Streaming layout: {} chunk(s), up to {} Z plane(s) per chunk; input has {} physical / {} logical TIFF plane(s).",
+        chunk_count, chunk_z, info.physical_pages, info.logical_pages
+    );
+    println!("Reading first chunk...");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
 
     let start = Instant::now();
+    let mut last_progress = Instant::now();
     let mut raw_bytes = 0usize;
     let mut chunks_written = 0u64;
     let plane_samples = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
@@ -1361,11 +1413,28 @@ fn encode_streaming_lossy(
                 out.write_all(&payload).map_err(|e| e.to_string())?;
                 raw_bytes += chunk.len() * 2;
                 chunks_written += 1;
+                if last_progress.elapsed().as_secs_f64() >= 1.0 || chunks_written == chunk_count {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let pct = 100.0 * chunks_written as f64 / chunk_count.max(1) as f64;
+                    println!(
+                        "  chunk {}/{} ({:.1}%)  raw {:.3} GiB  elapsed {:.1} s  {:.3} GB/s including TIFF I/O",
+                        chunks_written,
+                        chunk_count,
+                        pct,
+                        raw_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                        elapsed,
+                        gb_per_s(raw_bytes, elapsed)
+                    );
+                    std::io::stdout().flush().map_err(|e| e.to_string())?;
+                    last_progress = Instant::now();
+                }
                 z0 += depth;
             }
         }
     }
     out.flush().map_err(|e| e.to_string())?;
+    println!("Saving TIFF metadata...");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
     let metadata = tiff_metadata::capture(input, &info.layout)?;
     radelta_native::set_file_metadata(output, &metadata).map_err(|e| e.to_string())?;
     let total = fs::metadata(output).map_err(|e| e.to_string())?.len() as usize;
@@ -1751,7 +1820,7 @@ fn main() {
                                 ds.force_stream || raw_bytes.saturating_mul(4) > budget;
                             if use_stream {
                                 println!("Using out-of-core RDS3 encoding (estimated in-memory working set exceeds {} MiB).", ds.memory_mib);
-                                encode_streaming_lossless(input, output, opts, &ds)
+                                encode_streaming_lossless(input, output, opts, &ds, &info)
                             } else {
                                 match load_dataset(input, &ds) {
                                     Ok((data, layout)) => {
@@ -1823,7 +1892,7 @@ fn main() {
                                 ds.force_stream || raw_bytes.saturating_mul(4) > budget;
                             if use_stream {
                                 println!("Using out-of-core RQS3 encoding (estimated in-memory working set exceeds {} MiB).", ds.memory_mib);
-                                encode_streaming_lossy(input, output, opts, &ds)
+                                encode_streaming_lossy(input, output, opts, &ds, &info)
                             } else {
                                 match load_dataset(input, &ds) {
                                     Ok((data, layout)) => {

@@ -17,9 +17,13 @@ import java.util.Arrays;
 public class RadeltaMetadataTest {
     private ImagePlus image() {
         ImageStack stack = new ImageStack(3, 2);
-        for (int i = 0; i < 4; i++) stack.addSlice("plane " + i, new short[] {0, 1, 4, 9, 16, 25});
+        for (int i = 0; i < 8; i++) {
+            short[] pixels = new short[6];
+            for (int j = 0; j < pixels.length; j++) pixels[j] = (short) ((i * 6 + j) * (i * 6 + j));
+            stack.addSlice("plane " + i, pixels);
+        }
         ImagePlus image = new ImagePlus("Acquisition α", stack);
-        image.setDimensions(2, 2, 1);
+        image.setDimensions(2, 2, 2);
         Calibration c = image.getCalibration();
         c.pixelWidth = .125;
         c.pixelHeight = .25;
@@ -91,30 +95,37 @@ public class RadeltaMetadataTest {
         Path path = Files.createTempFile("radelta-fiji-", ".rdlt");
         Path resaved = Files.createTempFile("radelta-fiji-resaved-", ".rdlt");
         try {
-            for (boolean lossy : new boolean[] {false, true}) {
-                if (lossy) RadeltaExporter.saveLossy(original, path.toString(), 0, 1, 2, 1);
-                else RadeltaExporter.saveLossless(original, path.toString(), 1);
-                ImagePlus decoded = RadeltaImageFactory.openForDisplay(path.toString());
-                try {
-                    check(original, decoded);
-                    // Edits override the snapshot but do not lose opaque source bytes.
-                    decoded.getCalibration().pixelDepth = 2.5;
-                    decoded.setProperty("Info", "edited acquisition");
-                    decoded.getStack().setSliceLabel("edited label", 1);
-                    RadeltaExporter.saveLossless(decoded, resaved.toString(), 1);
-                    ImagePlus again = RadeltaImageFactory.openBase(resaved.toString());
+            for (boolean inMemory : new boolean[] {false, true}) {
+                for (boolean lossy : new boolean[] {false, true}) {
+                    if (lossy) RadeltaExporter.saveLossy(original, path.toString(), 0, 1, 2, 1);
+                    else RadeltaExporter.saveLossless(original, path.toString(), 1);
+                    ImagePlus decoded = RadeltaImageFactory.openForDisplay(path.toString(), inMemory);
+                    assertEquals(!inMemory, decoded.getStack().isVirtual());
+                    assertEquals(inMemory ? "memory" : "virtual", decoded.getProperty("Radelta.OpenMode"));
+                    assertEquals(2, decoded.getNChannels());
+                    assertEquals(2, decoded.getNSlices());
+                    assertEquals(2, decoded.getNFrames());
                     try {
-                        check(decoded, again);
-                        assertArrayEquals(
-                                RadeltaMetadata.capture(decoded), RadeltaMetadata.capture(again));
+                        check(original, decoded);
+                        // Edits override the snapshot but do not lose opaque source bytes.
+                        decoded.getCalibration().pixelDepth = 2.5;
+                        decoded.setProperty("Info", "edited acquisition");
+                        decoded.getStack().setSliceLabel("edited label", 1);
+                        RadeltaExporter.saveLossless(decoded, resaved.toString(), 1);
+                        ImagePlus again = RadeltaImageFactory.openBase(resaved.toString());
+                        try {
+                            check(decoded, again);
+                            assertArrayEquals(
+                                    RadeltaMetadata.capture(decoded), RadeltaMetadata.capture(again));
+                        } finally {
+                            close(again);
+                        }
+                        ImagePlus adopted = new ImagePlus();
+                        RadeltaImageFactory.adoptInto(adopted, decoded);
+                        check(decoded, adopted);
                     } finally {
-                        close(again);
+                        close(decoded);
                     }
-                    ImagePlus adopted = new ImagePlus();
-                    RadeltaImageFactory.adoptInto(adopted, decoded);
-                    check(decoded, adopted);
-                } finally {
-                    close(decoded);
                 }
             }
         } finally {
@@ -146,12 +157,12 @@ public class RadeltaMetadataTest {
     private byte[] tiffMetadata(String description) throws IOException {
         byte[] desc = (description + "\0").getBytes(StandardCharsets.UTF_8);
         ByteBuffer out =
-                ByteBuffer.allocate(8 + 1 + 8 + 4 * 8 + 8 + 8 + 20 + desc.length)
+                ByteBuffer.allocate(8 + 1 + 8 + 8 * 8 + 8 + 8 + 20 + desc.length)
                         .order(ByteOrder.LITTLE_ENDIAN);
         out.put("RDTIFF01".getBytes(StandardCharsets.US_ASCII));
         out.put((byte) 1);
-        out.putLong(4);
-        for (int i = 0; i < 4; i++) out.putLong(i);
+        out.putLong(8);
+        for (int i = 0; i < 8; i++) out.putLong(i);
         out.putLong(1);
         out.putLong(1);
         out.putShort((short) 270);

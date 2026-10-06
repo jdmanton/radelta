@@ -5,7 +5,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.radelta</groupId>
   <artifactId>radelta-imagej</artifactId>
-  <version>0.5.0</version>
+  <version>0.5.1</version>
   <name>Radelta ImageJ/Fiji Plugin</name>
   <description>Reader and writer for Radelta microscopy image files</description>
 

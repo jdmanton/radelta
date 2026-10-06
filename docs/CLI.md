@@ -183,3 +183,18 @@ See [metadata encoding](FORMAT.md#opaque-metadata-all-containers) for details.
 
 Codec benchmarks exclude metadata extraction and compression, so their sizes
 and timings describe the image codec. Actual encoded files include metadata.
+
+## Streaming progress
+
+Lossless RDS3 and lossy RQS3 encoding report the chunk layout before reading the
+first chunk. Progress reports show completed chunks, percentage, raw data
+processed, elapsed time and throughput including TIFF I/O. Reports are emitted
+after a completed chunk when at least one second has elapsed, and always after
+the final chunk. A long chunk may therefore take more than one second between
+updates. TIFF directory scans report every two seconds while advancing through
+the directories. A separate message marks metadata saving after the pixel
+chunks have been written.
+
+The TIFF layout found during the initial inspection is reused for encoding,
+avoiding a second directory scan. Progress is enabled automatically for forced
+(`--stream`) and automatically selected out-of-core encoding.
