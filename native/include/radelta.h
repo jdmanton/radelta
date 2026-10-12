@@ -50,6 +50,16 @@ typedef struct radelta_lossy_options {
     double noise_step;
 } radelta_lossy_options;
 
+/* One-pass allocating ND encoder. Both option pointers NULL gives lossless
+ * defaults; otherwise provide exactly one. On success release the returned
+ * pointer/size pair with radelta_buffer_free, never with C free(). */
+int32_t radelta_compress_u16_nd_alloc(
+    const uint16_t *input, size_t input_voxels,
+    uint32_t nx, uint32_t ny, uint32_t nz, uint32_t nc, uint32_t nt,
+    const radelta_options *options, const radelta_lossy_options *lossy_options,
+    uint8_t **output, size_t *output_size);
+void radelta_buffer_free(uint8_t *buffer, size_t size);
+
 /* Compress a contiguous Z,Y,X uint16 volume losslessly. */
 int32_t radelta_compress_u16(
     const uint16_t *input,

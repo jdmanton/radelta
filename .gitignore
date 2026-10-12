@@ -9,3 +9,7 @@
 .vscode/
 /.tools/
 /dist/
+
+/hdf5/build*/
+/hdf5/python/*.egg-info/
+__pycache__/

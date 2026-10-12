@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+- optional HDF5 compression filter with lossless and calibrated-lossy uint16
+  datasets, canonical multidimensional chunks and both byte orders;
+- Python HDF5 dataset API and bounded-memory TIFF import/export and dataset
+  recompression tools with progress reporting;
+- one-pass allocating C encoder and matching buffer release function;
+- HDF5 integration tests, Linux CI and five-platform online builds;
+- downloadable HDF5 SDK/plugin packages and automatic release attachments;
+- synchronised native, ImageJ and HDF5 package versions and Cargo.lock.
+
 ## 0.5.0
 
 Initial public release of Radelta, including:

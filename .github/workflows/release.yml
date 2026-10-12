@@ -110,6 +110,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  hdf5:
+    name: HDF5 packages
+    needs: verify
+    uses: ./.github/workflows/hdf5-build.yml
+
   imagej:
     name: Universal ImageJ/Fiji plugin
     needs: native
@@ -182,7 +187,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [native, imagej]
+    needs: [native, imagej, hdf5]
     runs-on: ubuntu-latest
 
     steps:
@@ -198,6 +203,12 @@ jobs:
         with:
           name: imagej-universal
           path: release-assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hdf5-*
+          path: release-assets
+          merge-multiple: true
 
       - name: Create checksums
         working-directory: release-assets

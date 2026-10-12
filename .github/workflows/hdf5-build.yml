@@ -1,0 +1,112 @@
+name: HDF5 builds
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - '.github/workflows/hdf5-build.yml'
+      - '.github/workflows/release.yml'
+      - 'hdf5/**'
+      - 'native/**'
+      - 'scripts/build_hdf5_dependency.py'
+      - 'scripts/package_hdf5.py'
+      - 'scripts/check_release_metadata.py'
+      - 'rust-toolchain.toml'
+      - 'VERSION'
+      - 'LICENSE'
+  pull_request:
+    paths:
+      - '.github/workflows/hdf5-build.yml'
+      - '.github/workflows/release.yml'
+      - 'hdf5/**'
+      - 'native/**'
+      - 'scripts/build_hdf5_dependency.py'
+      - 'scripts/package_hdf5.py'
+      - 'scripts/check_release_metadata.py'
+      - 'rust-toolchain.toml'
+      - 'VERSION'
+      - 'LICENSE'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: HDF5 ${{ matrix.label }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            label: Windows x86-64
+            platform: windows
+            arch: x86_64
+          - runner: ubuntu-24.04
+            label: Linux x86-64
+            platform: linux
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            label: Linux ARM64
+            platform: linux
+            arch: aarch64
+          - runner: macos-15-intel
+            label: macOS Intel
+            platform: macos
+            arch: x86_64
+          - runner: macos-15
+            label: macOS Apple Silicon
+            platform: macos
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Check release metadata
+        run: python scripts/check_release_metadata.py
+      - name: Check out HDF5 1.14.6
+        uses: actions/checkout@v4
+        with:
+          repository: HDFGroup/hdf5
+          ref: 7bf340440909d468dbb3cf41f0ea0d87f5050cea
+          path: _deps/hdf5-source
+          persist-credentials: false
+      - name: Build matching shared HDF5 SDK
+        run: >-
+          python scripts/build_hdf5_dependency.py
+          --source _deps/hdf5-source
+          --build _deps/hdf5-build
+          --prefix _deps/hdf5-install
+      - name: Configure and build plugin
+        run: |
+          cmake -S hdf5 -B hdf5/build -DCMAKE_BUILD_TYPE=Release \
+            -DHDF5_ROOT="$GITHUB_WORKSPACE/_deps/hdf5-install" \
+            -DHDF5_USE_STATIC_LIBRARIES=OFF
+          cmake --build hdf5/build --config Release --parallel 2
+      - name: Install plugin and native test
+        run: cmake --install hdf5/build --config Release --prefix "$GITHUB_WORKSPACE/_deps/hdf5-install"
+      - name: Package and test relocated binaries
+        run: >-
+          python scripts/package_hdf5.py
+          --platform ${{ matrix.platform }}
+          --arch ${{ matrix.arch }}
+          --prefix _deps/hdf5-install
+          --hdf5-source _deps/hdf5-source
+          --hdf5-version 1.14.6
+          --smoke-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hdf5-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/radelta-hdf5-*.zip
+          if-no-files-found: error
+          retention-days: 14

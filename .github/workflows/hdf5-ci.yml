@@ -1,0 +1,26 @@
+name: hdf5-ci
+on:
+  push:
+  pull_request:
+jobs:
+  hdf5:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Install matching HDF5 and Python libraries
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev python3-h5py python3-tifffile
+      - name: Build filter
+        run: |
+          cmake -S hdf5 -B hdf5/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build hdf5/build --parallel 2
+      - name: Native HDF5 integration
+        run: ctest --test-dir hdf5/build --output-on-failure
+      - name: Python HDF5 and file-conversion integration
+        env:
+          PYTHONPATH: hdf5/python
+          RADELTA_HDF5_PLUGIN_PATH: ${{ github.workspace }}/hdf5/build/plugins
+          PYTHONNOUSERSITE: '1'
+        run: /usr/bin/python3 -m unittest discover -s hdf5/tests -v

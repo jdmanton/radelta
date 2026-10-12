@@ -15,6 +15,85 @@ pub const RADELTA_BUFFER_TOO_SMALL: i32 = 1;
 pub const RADELTA_INVALID_ARGUMENT: i32 = -1;
 pub const RADELTA_CODEC_ERROR: i32 = -2;
 
+/// Compress once and transfer ownership of the encoded buffer to a C caller.
+/// Pass null for both option pointers for lossless defaults, or exactly one
+/// option pointer. Release a successful result using `radelta_buffer_free`.
+///
+/// # Safety
+/// Input and non-null options must be valid; output and output_size must be
+/// writable. Input must contain input_voxels aligned uint16 values.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn radelta_compress_u16_nd_alloc(
+    input: *const u16,
+    input_voxels: usize,
+    nx: u32,
+    ny: u32,
+    nz: u32,
+    nc: u32,
+    nt: u32,
+    options: *const Options,
+    lossy_options: *const LossyOptions,
+    output: *mut *mut u8,
+    output_size: *mut usize,
+) -> i32 {
+    if output.is_null() || output_size.is_null() {
+        return RADELTA_INVALID_ARGUMENT;
+    }
+    *output = std::ptr::null_mut();
+    *output_size = 0;
+    if input.is_null() || (!options.is_null() && !lossy_options.is_null()) {
+        return RADELTA_INVALID_ARGUMENT;
+    }
+    let dims = Dims5 {
+        x: nx as usize,
+        y: ny as usize,
+        z: nz as usize,
+        c: nc as usize,
+        t: nt as usize,
+    };
+    if dims.voxels().ok() != Some(input_voxels) {
+        return RADELTA_INVALID_ARGUMENT;
+    }
+    let result = std::panic::catch_unwind(|| {
+        let src = slice::from_raw_parts(input, input_voxels);
+        if lossy_options.is_null() {
+            let opts = if options.is_null() {
+                Options::default()
+            } else {
+                *options
+            };
+            compress_u16_nd(src, dims, opts)
+        } else {
+            compress_lossy_u16_nd(src, dims, *lossy_options)
+        }
+    });
+    match result {
+        Ok(Ok(bytes)) => {
+            let mut bytes = bytes.into_boxed_slice();
+            *output_size = bytes.len();
+            *output = bytes.as_mut_ptr();
+            std::mem::forget(bytes);
+            RADELTA_OK
+        }
+        _ => RADELTA_CODEC_ERROR,
+    }
+}
+
+/// Release a buffer returned by `radelta_compress_u16_nd_alloc`; null is a no-op.
+///
+/// # Safety
+/// The pointer and size must be the unchanged pair returned by a successful
+/// allocation call and must not have already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn radelta_buffer_free(buffer: *mut u8, size: usize) {
+    if !buffer.is_null() {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            buffer, size,
+        )));
+    }
+}
+
 /// Compress a contiguous XYZ uint16 volume through the C ABI.
 ///
 /// # Safety
@@ -295,42 +374,45 @@ pub unsafe extern "C" fn radelta_decompress_u16_nd(
     nc: *mut u32,
     nt: *mut u32,
 ) -> i32 {
-    if input.is_null() || output_voxels.is_null() {
-        return RADELTA_INVALID_ARGUMENT;
-    }
-    let src = slice::from_raw_parts(input, input_size);
-    let dims = match inspect_shape(src) {
-        Ok(v) => v,
-        Err(_) => return RADELTA_CODEC_ERROR,
-    };
-    let needed = match dims.voxels() {
-        Ok(v) => v,
-        Err(_) => return RADELTA_CODEC_ERROR,
-    };
-    *output_voxels = needed;
-    if !nx.is_null() {
-        *nx = dims.x as u32;
-    }
-    if !ny.is_null() {
-        *ny = dims.y as u32;
-    }
-    if !nz.is_null() {
-        *nz = dims.z as u32;
-    }
-    if !nc.is_null() {
-        *nc = dims.c as u32;
-    }
-    if !nt.is_null() {
-        *nt = dims.t as u32;
-    }
-    if output.is_null() || output_capacity_voxels < needed {
-        return RADELTA_BUFFER_TOO_SMALL;
-    }
-    let dst = slice::from_raw_parts_mut(output, needed);
-    match decompress_u16_nd_into(src, dst) {
-        Ok(decoded_dims) if decoded_dims == dims => RADELTA_OK,
-        Ok(_) | Err(_) => RADELTA_CODEC_ERROR,
-    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if input.is_null() || output_voxels.is_null() {
+            return RADELTA_INVALID_ARGUMENT;
+        }
+        let src = slice::from_raw_parts(input, input_size);
+        let dims = match inspect_shape(src) {
+            Ok(v) => v,
+            Err(_) => return RADELTA_CODEC_ERROR,
+        };
+        let needed = match dims.voxels() {
+            Ok(v) => v,
+            Err(_) => return RADELTA_CODEC_ERROR,
+        };
+        *output_voxels = needed;
+        if !nx.is_null() {
+            *nx = dims.x as u32;
+        }
+        if !ny.is_null() {
+            *ny = dims.y as u32;
+        }
+        if !nz.is_null() {
+            *nz = dims.z as u32;
+        }
+        if !nc.is_null() {
+            *nc = dims.c as u32;
+        }
+        if !nt.is_null() {
+            *nt = dims.t as u32;
+        }
+        if output.is_null() || output_capacity_voxels < needed {
+            return RADELTA_BUFFER_TOO_SMALL;
+        }
+        let dst = slice::from_raw_parts_mut(output, needed);
+        match decompress_u16_nd_into(src, dst) {
+            Ok(decoded_dims) if decoded_dims == dims => RADELTA_OK,
+            Ok(_) | Err(_) => RADELTA_CODEC_ERROR,
+        }
+    }))
+    .unwrap_or(RADELTA_CODEC_ERROR)
 }
 
 /// Configure the process-wide metadata byte limit before starting I/O.
@@ -573,6 +655,78 @@ mod tests {
             );
             assert_eq!(status, RADELTA_OK);
             assert_eq!(decoded, input);
+        }
+    }
+
+    #[test]
+    fn allocating_encoder_owns_one_pass_output() {
+        let input = vec![1234u16; 2 * 3 * 4 * 2];
+        let mut pointer = std::ptr::null_mut();
+        let mut size = 0;
+        unsafe {
+            assert_eq!(
+                radelta_compress_u16_nd_alloc(
+                    input.as_ptr(),
+                    input.len(),
+                    2,
+                    3,
+                    4,
+                    2,
+                    1,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    &mut pointer,
+                    &mut size
+                ),
+                RADELTA_OK
+            );
+            assert!(!pointer.is_null());
+            let encoded = slice::from_raw_parts(pointer, size);
+            let mut decoded = vec![0u16; input.len()];
+            decompress_u16_nd_into(encoded, &mut decoded).unwrap();
+            assert_eq!(decoded, input);
+            radelta_buffer_free(pointer, size);
+            radelta_buffer_free(std::ptr::null_mut(), 0);
+            pointer = std::ptr::dangling_mut();
+            assert_eq!(
+                radelta_compress_u16_nd_alloc(
+                    input.as_ptr(),
+                    1,
+                    2,
+                    3,
+                    4,
+                    2,
+                    1,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    &mut pointer,
+                    &mut size
+                ),
+                RADELTA_INVALID_ARGUMENT
+            );
+            assert!(pointer.is_null());
+            assert_eq!(size, 0);
+            let invalid = Options {
+                context_mode: 255,
+                ..Options::default()
+            };
+            assert_eq!(
+                radelta_compress_u16_nd_alloc(
+                    input.as_ptr(),
+                    input.len(),
+                    2,
+                    3,
+                    4,
+                    2,
+                    1,
+                    &invalid,
+                    std::ptr::null(),
+                    &mut pointer,
+                    &mut size
+                ),
+                RADELTA_CODEC_ERROR
+            );
+            assert!(pointer.is_null());
         }
     }
 

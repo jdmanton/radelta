@@ -64,6 +64,14 @@ For the same z-stack and PC as for the lossless compression benchmark, a gain of
 |---|---:|---:|---:|---:|---:|
 | Radelta | 5.393 | 0.461 | 34.68:1 | 3.373 | 6.849 |
 
+## HDF5 files
+
+The optional [HDF5 plugin and file tools](hdf5/README.md) store chunked uint16
+datasets using lossless or calibrated-lossy Radelta compression. Standard HDF5
+readers can access slices and regions with the plugin installed. The companion
+`radelta-hdf5` command imports TIFF stacks, exports TIFF stacks and recompresses
+existing HDF5 datasets. Native codec builds do not require HDF5.
+
 ## Building
 
 The native codec requires Rust. From the repository root:
@@ -167,7 +175,7 @@ opaque metadata is retained when a Radelta file is edited and resaved. TIFF
 metadata from the CLI supplies common ImageJ/OME calibration on opening.
 Arbitrary Java objects, ROIs, and display LUTs are not serialized.
 
-To install, download the released `radelta-imagej-0.5.0.jar`, copy it into
+To install, download the released `radelta-imagej-0.6.0.jar`, copy it into
 Fiji's `plugins` folder, and restart Fiji. Remove any older Radelta plugin JAR
 from that folder to avoid loading duplicate plugins. The release JAR includes
 native libraries for all supported platforms.
@@ -192,7 +200,7 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.5.0.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.6.0.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
 

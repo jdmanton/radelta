@@ -164,3 +164,14 @@ operations rather than changing policy while I/O is underway.
 This limits uncompressed metadata size, not total working memory: compression
 and decoding also need input/output buffers. Platform allocation limits still
 apply. The setting does not change the on-disk format.
+
+## Allocating encoding
+
+`radelta_compress_u16_nd_alloc` encodes once and returns an owned byte buffer.
+Pass both options pointers as NULL for lossless defaults, or exactly one of
+`radelta_options` and `radelta_lossy_options`. On success release the unchanged
+pointer/size pair using `radelta_buffer_free`, never `free`. On failure the
+output pointer and size are cleared. NULL buffer release is a no-op.
+
+The optional [HDF5 filter](../hdf5/README.md) uses this API to avoid encoding
+each chunk twice merely to determine the output size.

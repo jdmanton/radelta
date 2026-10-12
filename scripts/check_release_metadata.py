@@ -20,6 +20,16 @@ pom_version = pom_root.findtext("m:version", namespaces=ns)
 if pom_version != version:
     errors.append(f"imagej-plugin/pom.xml version is {pom_version!r}, expected {version}")
 
+hdf5_cmake = (ROOT / "hdf5" / "CMakeLists.txt").read_text(encoding="utf-8")
+m = re.search(r"project\(radelta_hdf5 VERSION ([^\s)]+)", hdf5_cmake)
+if not m or m.group(1) != version:
+    errors.append(f"hdf5/CMakeLists.txt version is {m.group(1) if m else 'missing'}, expected {version}")
+
+hdf5_python = (ROOT / "hdf5" / "python" / "pyproject.toml").read_text(encoding="utf-8")
+m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', hdf5_python)
+if not m or m.group(1) != version:
+    errors.append(f"HDF5 Python version is {m.group(1) if m else 'missing'}, expected {version}")
+
 
 if errors:
     for error in errors:

@@ -198,3 +198,9 @@ chunks have been written.
 The TIFF layout found during the initial inspection is reused for encoding,
 avoiding a second directory scan. Progress is enabled automatically for forced
 (`--stream`) and automatically selected out-of-core encoding.
+
+## HDF5 conversion
+
+The companion `radelta-hdf5` command supports TIFF → HDF5, HDF5 → TIFF and
+HDF5 dataset recompression. See [HDF5 build and usage](../hdf5/README.md).
+It is installed separately and uses the optional HDF5 compression filter.
