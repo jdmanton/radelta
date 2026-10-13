@@ -13,3 +13,7 @@
 /hdf5/build*/
 /hdf5/python/*.egg-info/
 __pycache__/
+
+/zarr/python/*.egg-info/
+/zarr/python/build/
+/zarr/python/dist/

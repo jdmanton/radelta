@@ -71,6 +71,19 @@ def main() -> int:
     for name in ("FORMAT.md", "CLI.md", "C_API.md"):
         shutil.copy2(ROOT / "docs" / name, docs / name)
 
+    # Ship a Python OME-Zarr codec package backed by this exact native build.
+    # pip install ./python/zarr installs the matching library automatically.
+    zarr_package = ROOT / "zarr" / "python"
+    if zarr_package.is_dir():
+        destination = stage / "python" / "zarr"
+        shutil.copytree(zarr_package, destination,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "build", "dist"))
+        bundled = destination / "radelta_zarr" / "natives"
+        bundled.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(lib_src, bundled / lib_name)
+        shutil.copy2(ROOT / "LICENSE", destination / "LICENSE")
+        shutil.copy2(ROOT / "zarr" / "README.md", docs / "OME_ZARR.md")
+
     archive_base = dist / package_name
     archive = shutil.make_archive(str(archive_base), "zip", root_dir=dist, base_dir=package_name)
     print(archive)

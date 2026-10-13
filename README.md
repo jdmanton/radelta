@@ -64,6 +64,32 @@ For the same z-stack and PC as for the lossless compression benchmark, a gain of
 |---|---:|---:|---:|---:|---:|
 | Radelta | 5.393 | 0.461 | 34.68:1 | 3.373 | 6.849 |
 
+## OME-Zarr
+
+The optional [OME-Zarr codecs and tools](zarr/README.md) support OME-Zarr 0.4
+(Zarr v2) and 0.5 (Zarr v3), using native Radelta compression for uint16 image
+chunks. They provide TIFF import/export, recompression of existing multiscale
+hierarchies, partial reads, lossless labels and calibrated lossy image data.
+Native release ZIPs include the matching Python codec package under `python/zarr`.
+Releases also provide self-contained `radelta_zarr` wheels for direct pip
+installation; choose the wheel for your operating system and architecture.
+
+## Release packages
+
+Each version has one GitHub release with separate installation assets:
+
+| Asset | Contents |
+|---|---|
+| `radelta-<version>-<platform>-<arch>.zip` | CLI, C library/header, documentation and optional Zarr source package |
+| `radelta_zarr-<version>-py3-none-<platform>.whl` | Python Zarr codec/converter with the matching native library |
+| `radelta-hdf5-<version>-<platform>-<arch>.zip` | HDF5 filter, compatible runtime/tools and Python helpers |
+| `radelta-imagej-<version>.jar` | ImageJ plugin with native libraries for all five supported platforms |
+
+Zarr wheels are tested in isolated installations before being uploaded.
+Linux builds use a glibc 2.28 baseline; macOS builds target 11.0 or later.
+The native library is built once per platform and reused for the native ZIP,
+Zarr wheel and ImageJ assets. HDF5 is built separately.
+
 ## HDF5 files
 
 The optional [HDF5 plugin and file tools](hdf5/README.md) store chunked uint16
@@ -175,7 +201,7 @@ opaque metadata is retained when a Radelta file is edited and resaved. TIFF
 metadata from the CLI supplies common ImageJ/OME calibration on opening.
 Arbitrary Java objects, ROIs, and display LUTs are not serialized.
 
-To install, download the released `radelta-imagej-0.6.0.jar`, copy it into
+To install, download the released `radelta-imagej-0.7.0.jar`, copy it into
 Fiji's `plugins` folder, and restart Fiji. Remove any older Radelta plugin JAR
 from that folder to avoid loading duplicate plugins. The release JAR includes
 native libraries for all supported platforms.
@@ -200,7 +226,7 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.6.0.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.7.0.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
 

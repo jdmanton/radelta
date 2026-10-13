@@ -31,6 +31,17 @@ if not m or m.group(1) != version:
     errors.append(f"HDF5 Python version is {m.group(1) if m else 'missing'}, expected {version}")
 
 
+zarr_python = (ROOT / "zarr" / "python" / "pyproject.toml").read_text(encoding="utf-8")
+m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', zarr_python)
+if not m or m.group(1) != version:
+    errors.append(f"OME-Zarr Python version is {m.group(1) if m else 'missing'}, expected {version}")
+
+zarr_native = (ROOT / "zarr" / "python" / "radelta_zarr" / "_native.py").read_text(encoding="utf-8")
+m = re.search(r'(?m)^VERSION\s*=\s*"([^"]+)"', zarr_native)
+if not m or m.group(1) != version:
+    errors.append(f"OME-Zarr runtime version is {m.group(1) if m else 'missing'}, expected {version}")
+
+
 if errors:
     for error in errors:
         print(f"ERROR: {error}", file=sys.stderr)

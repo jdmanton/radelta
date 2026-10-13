@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0
+
+- Radelta codecs for Zarr v2 and v3, with checksummed chunk framing;
+- OME-Zarr 0.4/0.5 TIFF import/export and multiscale recompression;
+- optional XY mean pyramids with physical coordinate transforms;
+- lossless label handling, partial access, sharding and native release packaging;
+- bounded TIFF page caching and concurrent chunk writes for faster encoding;
+- self-contained Python wheels for all five release platforms, with repaired
+  dependencies, platform compatibility checks and isolated installation tests;
+- corrected ImageJ native-library selection and macOS wheel architecture tags.
+
 ## 0.6.0
 
 - optional HDF5 compression filter with lossless and calibrated-lossy uint16

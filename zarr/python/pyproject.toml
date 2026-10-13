@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radelta-zarr"
+version = "0.7.0"
+description = "Native Radelta codecs and OME-Zarr tools for uint16 microscopy"
+requires-python = ">=3.11"
+license = {text = "BSD-3-Clause"}
+dependencies = ["numpy>=1.26", "zarr>=3.1.2,<4", "numcodecs>=0.16.3", "tifffile>=2024.2.12"]
+
+[project.scripts]
+radelta-zarr = "radelta_zarr.__main__:main"
+
+[project.entry-points."zarr.codecs"]
+"radelta.radelta" = "radelta_zarr.codecs:RadeltaCodec"
+
+[project.entry-points."numcodecs.codecs"]
+"radelta.radelta" = "radelta_zarr.codecs:RadeltaNumcodec"
+
+[tool.setuptools.package-data]
+radelta_zarr = ["natives/*.dll", "natives/*.so", "natives/*.dylib"]
