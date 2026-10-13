@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.1
+
+- deterministic OME-Zarr concurrency tests for bounded reading and draining
+  active writes after an error;
+- standalone read-only HDF5 filter for Fiji's existing HDF5_Vibez/JHDF5 reader,
+  with separate release downloads and headless importer integration tests;
+- HDF5 decoder bundled into the existing ImageJ JAR with automatic startup
+  registration, plus a complete Fiji installation ZIP with reader dependencies;
+
 ## 0.7.0
 
 - Radelta codecs for Zarr v2 and v3, with checksummed chunk framing;

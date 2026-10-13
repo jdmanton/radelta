@@ -66,11 +66,16 @@ def main():
         stage = Path(temporary) / name
         # Dereference SDK symlinks: Windows and ZIP extractors need actual bytes.
         shutil.copytree(prefix, stage, symlinks=False)
+        # The lightweight reader belongs in its own archive. Keep duplicate
+        # filter IDs/libraries out of the SDK installation package.
+        shutil.rmtree(stage / "lib" / "hdf5" / "fiji-plugins", ignore_errors=True)
+        (stage / "bin" / ("radelta-hdf5-fiji-fixture" + suffix)).unlink(missing_ok=True)
         (stage / "bin" / ("hdf5_roundtrip" + suffix)).rename(stage / "bin" / ("radelta-hdf5-check" + suffix))
         for filename in ("LICENSE", "VERSION"):
             shutil.copy2(ROOT / filename, stage / filename)
         shutil.copy2(args.hdf5_source / "COPYING", stage / "HDF5_LICENSE.txt")
         shutil.copy2(ROOT / "hdf5" / "README.md", stage / "HDF5.md")
+        shutil.copy2(ROOT / "hdf5" / "FIJI.md", stage / "FIJI.md")
         shutil.copy2(ROOT / "hdf5" / "ONLINE_BUILDS.md", stage / "README.md")
         shutil.copytree(ROOT / "hdf5" / "python", stage / "python",
                         ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "build", "dist"))

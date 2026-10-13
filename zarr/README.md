@@ -17,7 +17,7 @@ Download the `radelta_zarr` wheel for your operating system and architecture
 from the GitHub release, then install that file. For Windows x86-64:
 
 ```powershell
-python -m pip install .\radelta_zarr-0.7.0-py3-none-win_amd64.whl
+python -m pip install .\radelta_zarr-0.7.1-py3-none-win_amd64.whl
 python -m radelta_zarr --help
 ```
 

@@ -1,4 +1,5 @@
 import copy
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 import io
 import json
@@ -200,10 +201,29 @@ class OmeTests(NativeCase):
                 self.assertEqual(chunks(outputs[0]), chunks(outputs[1]))
 
     def test_parallel_pipeline_is_bounded_and_drains_errors(self):
-        main_thread = threading.get_ident()
+        # A barrier alone does not guarantee which writer finishes first.
+        # Hold both writes so read-ahead can be measured, then fail one while
+        # the other stays blocked until the pipeline has observed the error.
+        source_thread = None
         active, peak, reads = 0, 0, 0
         lock = threading.Lock()
-        pair = threading.Barrier(2)
+        writers_ready = threading.Barrier(3)
+        fail_write = threading.Event()
+        finish_write = threading.Event()
+        unwinding = threading.Event()
+        returned = threading.Event()
+        failure = OSError("write failed")
+        errors, shutdown_errors, active_after_shutdown = [], [], []
+
+        class ObservedExecutor(ThreadPoolExecutor):
+            def __exit__(self, exc_type, exc, traceback):
+                shutdown_errors.append(exc)
+                unwinding.set()
+                result = super().__exit__(exc_type, exc, traceback)
+                with lock:
+                    active_after_shutdown.append(active)
+                return result
+
         class Target:
             def __setitem__(self, selection, block):
                 nonlocal active, peak
@@ -212,23 +232,63 @@ class OmeTests(NativeCase):
                     peak = max(peak, active)
                 try:
                     if selection < 2:
-                        pair.wait(timeout=5)
+                        writers_ready.wait(timeout=30)
+                        gate = fail_write if selection == 0 else finish_write
+                        if not gate.wait(timeout=30):
+                            raise RuntimeError("Timed out coordinating test writes")
                     if selection == 0:
-                        raise OSError("write failed")
+                        raise failure
                 finally:
                     with lock:
                         active -= 1
         def blocks():
             nonlocal reads
             for i in range(100):
-                self.assertEqual(threading.get_ident(), main_thread)
-                reads += 1
+                self.assertEqual(threading.get_ident(), source_thread)
+                with lock:
+                    reads += 1
                 yield i, np.zeros((7, 9), dtype=np.uint16)
-        with self.assertRaisesRegex(OSError, "write failed"):
-            _write_chunks(Target(), blocks(), workers=2, path="0", progress=None)
+
+        def run_pipeline():
+            nonlocal source_thread
+            source_thread = threading.get_ident()
+            try:
+                _write_chunks(Target(), blocks(), workers=2, path="0", progress=None)
+            except Exception as error:
+                errors.append(error)
+            finally:
+                returned.set()
+
+        with patch("radelta_zarr.ome.ThreadPoolExecutor", ObservedExecutor):
+            caller = threading.Thread(target=run_pipeline, name="test-zarr-producer", daemon=True)
+            caller.start()
+            ready = False
+            try:
+                writers_ready.wait(timeout=30)
+                ready = True
+                with lock:
+                    self.assertEqual((active, peak, reads), (2, 2, 2))
+                fail_write.set()
+                self.assertTrue(unwinding.wait(timeout=30), "Pipeline did not observe the failed write")
+                self.assertEqual(shutdown_errors, [failure])
+                self.assertFalse(returned.is_set(), "Pipeline returned before its active write finished")
+                with lock:
+                    self.assertEqual((active, reads), (1, 2))
+            finally:
+                # Release every gate even if an assertion fails; leave no
+                # blocked executor threads behind on any CI platform.
+                fail_write.set()
+                finish_write.set()
+                if not ready:
+                    writers_ready.abort()
+                caller.join(timeout=30)
+            self.assertFalse(caller.is_alive(), "Pipeline did not finish draining its writes")
+        self.assertEqual(errors, [failure])
+        self.assertTrue(returned.is_set())
+        self.assertEqual(active_after_shutdown, [0])
         self.assertEqual(active, 0)
         self.assertEqual(peak, 2)
-        self.assertLessEqual(reads, 3)
+        self.assertEqual(reads, 2)
 
     def test_pyramid_and_coordinate_centres(self):
         x = np.arange(5*13*17, dtype=np.uint16).reshape(5, 13, 17)

@@ -7,9 +7,12 @@ on:
       - '.github/workflows/hdf5-build.yml'
       - '.github/workflows/release.yml'
       - 'hdf5/**'
+      - 'imagej-plugin/**'
       - 'native/**'
       - 'scripts/build_hdf5_dependency.py'
       - 'scripts/package_hdf5.py'
+      - 'scripts/package_hdf5_fiji.py'
+      - 'scripts/test_hdf5_fiji.py'
       - 'scripts/check_release_metadata.py'
       - 'rust-toolchain.toml'
       - 'VERSION'
@@ -19,9 +22,12 @@ on:
       - '.github/workflows/hdf5-build.yml'
       - '.github/workflows/release.yml'
       - 'hdf5/**'
+      - 'imagej-plugin/**'
       - 'native/**'
       - 'scripts/build_hdf5_dependency.py'
       - 'scripts/package_hdf5.py'
+      - 'scripts/package_hdf5_fiji.py'
+      - 'scripts/test_hdf5_fiji.py'
       - 'scripts/check_release_metadata.py'
       - 'rust-toolchain.toml'
       - 'VERSION'
@@ -69,6 +75,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
@@ -104,6 +114,21 @@ jobs:
           --hdf5-source _deps/hdf5-source
           --hdf5-version 1.14.6
           --smoke-test
+      - name: Package standalone Fiji decoder
+        run: >-
+          python scripts/package_hdf5_fiji.py
+          --platform ${{ matrix.platform }}
+          --arch ${{ matrix.arch }}
+          --prefix _deps/hdf5-install
+          --hdf5-source _deps/hdf5-source
+      - name: Test relocated decoder and existing Fiji importer
+        run: |
+          version=$(cat VERSION)
+          python scripts/test_hdf5_fiji.py \
+            --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} \
+            --prefix _deps/hdf5-install \
+            --build-imagej \
+            --archive "dist/radelta-hdf5-fiji-${version}-${{ matrix.platform }}-${{ matrix.arch }}.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: hdf5-${{ matrix.platform }}-${{ matrix.arch }}

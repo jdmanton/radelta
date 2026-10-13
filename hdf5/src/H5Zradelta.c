@@ -2,6 +2,7 @@
 #include <hdf5.h>
 #include <H5PLextern.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "radelta.h"
@@ -12,6 +13,18 @@
 #define OPTIONS_COUNT 11
 #define LOCAL_COUNT 17
 #define PARAM_VERSION 1
+
+/* Fiji/JHDF5 embeds its own HDF5 library. A decoder does not need HDF5 API
+ * calls: use the shared system C runtime and ship no second HDF5 runtime.
+ * On Windows this target and supported JHDF5 19.04.1 both use the shared UCRT.
+ * The ordinary read/write filter continues using HDF5's allocator. */
+#ifdef RADELTA_HDF5_DECODE_ONLY
+#define FILTER_ALLOC(n) malloc(n)
+#define FILTER_FREE(p) free(p)
+#else
+#define FILTER_ALLOC(n) H5allocate_memory((n), 0)
+#define FILTER_FREE(p) H5free_memory(p)
+#endif
 
 /* cd_values: version, lossy, block depth, context, scale bits,
  * offset/gain/noise as low/high uint32 pairs, X,Y,Z,C,T, byte order (0 LE/1 BE).
@@ -31,6 +44,7 @@ static int valid_options(const unsigned *p) {
         isfinite(unpack_double(p+9)) && unpack_double(p+9) > 0);
 }
 
+#ifndef RADELTA_HDF5_DECODE_ONLY
 static htri_t can_apply(hid_t dcpl, hid_t type, hid_t space) {
     int rank = H5Sget_simple_extent_ndims(space);
     H5T_order_t order = H5Tget_order(type);
@@ -85,6 +99,7 @@ static void decode_pixels(const uint8_t *bytes, uint16_t *pixels, size_t n, int 
         (uint16_t)(((uint16_t)bytes[2*i] << 8) | bytes[2*i+1]) :
         (uint16_t)(bytes[2*i] | ((uint16_t)bytes[2*i+1] << 8));
 }
+#endif
 
 static void encode_pixels(const uint16_t *pixels, uint8_t *bytes, size_t n, int big) {
     size_t i;
@@ -121,47 +136,56 @@ static size_t filter(unsigned flags, size_t count, const unsigned p[],
             &needed, &x, &y, &z, &c, &t);
         if (status != RADELTA_BUFFER_TOO_SMALL || needed != voxels ||
             x != p[11] || y != p[12] || z != p[13] || c != p[14] || t != p[15]) return 0;
-        pixels = H5allocate_memory(bytes, 0);
+        pixels = FILTER_ALLOC(bytes);
         if (!pixels) return 0;
         status = radelta_decompress_u16_nd(*buffer, nbytes, pixels, voxels,
             &needed, &x, &y, &z, &c, &t);
         if (status != RADELTA_OK) goto failure;
-        result = H5allocate_memory(bytes, 0);
+        result = FILTER_ALLOC(bytes);
         if (!result) goto failure;
         encode_pixels(pixels, result, voxels, p[16]);
         result_size = bytes;
     } else {
+#ifdef RADELTA_HDF5_DECODE_ONLY
+        return 0;
+#else
         radelta_options opts = {p[2], p[3], p[4]};
         radelta_lossy_options lossy = {p[2], p[3], p[4],
             unpack_double(p+5), unpack_double(p+7), unpack_double(p+9)};
         if (nbytes != bytes) return 0;
-        pixels = H5allocate_memory(bytes, 0);
+        pixels = FILTER_ALLOC(bytes);
         if (!pixels) return 0;
         decode_pixels(*buffer, pixels, voxels, p[16]);
         status = radelta_compress_u16_nd_alloc(pixels, voxels,
             p[11], p[12], p[13], p[14], p[15],
             p[1] ? NULL : &opts, p[1] ? &lossy : NULL, &encoded, &result_size);
         if (status != RADELTA_OK) goto failure;
-        result = H5allocate_memory(result_size, 0);
+        result = FILTER_ALLOC(result_size);
         if (!result) goto failure;
         memcpy(result, encoded, result_size);
+#endif
     }
-    H5free_memory(pixels);
+    FILTER_FREE(pixels);
     radelta_buffer_free(encoded, encoded ? result_size : 0);
-    H5free_memory(*buffer);
+    FILTER_FREE(*buffer);
     *buffer = result;
     *capacity = result_size;
     return result_size;
 failure:
-    H5free_memory(pixels);
-    H5free_memory(result);
+    FILTER_FREE(pixels);
+    FILTER_FREE(result);
     radelta_buffer_free(encoded, encoded ? result_size : 0);
     return 0;
 }
 
 static const H5Z_class2_t cls = {
+#ifdef RADELTA_HDF5_DECODE_ONLY
+    H5Z_CLASS_T_VERS, RADELTA_HDF5_FILTER_ID, 0, 1,
+    "Radelta 0.7.1 (uint16 TCZYX, decoder)", NULL, NULL, filter
+#else
     H5Z_CLASS_T_VERS, RADELTA_HDF5_FILTER_ID, 1, 1,
-    "Radelta 0.7.0 (uint16 TCZYX)", can_apply, set_local, filter
+    "Radelta 0.7.1 (uint16 TCZYX)", can_apply, set_local, filter
+#endif
 };
 H5PL_type_t H5PLget_plugin_type(void) { return H5PL_TYPE_FILTER; }
 const void *H5PLget_plugin_info(void) { return &cls; }

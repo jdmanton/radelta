@@ -5,9 +5,9 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.radelta</groupId>
   <artifactId>radelta-imagej</artifactId>
-  <version>0.7.0</version>
+  <version>0.7.1</version>
   <name>Radelta ImageJ/Fiji Plugin</name>
-  <description>Reader and writer for Radelta microscopy image files</description>
+  <description>Radelta microscopy image reader/writer with bundled HDF5 decoder support</description>
 
   <properties>
     <maven.compiler.release>8</maven.compiler.release>

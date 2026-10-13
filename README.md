@@ -83,7 +83,9 @@ Each version has one GitHub release with separate installation assets:
 | `radelta-<version>-<platform>-<arch>.zip` | CLI, C library/header, documentation and optional Zarr source package |
 | `radelta_zarr-<version>-py3-none-<platform>.whl` | Python Zarr codec/converter with the matching native library |
 | `radelta-hdf5-<version>-<platform>-<arch>.zip` | HDF5 filter, compatible runtime/tools and Python helpers |
-| `radelta-imagej-<version>.jar` | ImageJ plugin with native libraries for all five supported platforms |
+| `radelta-hdf5-fiji-<version>-<platform>-<arch>.zip` | Standalone read-only filter for native HDF5 readers |
+| `radelta-imagej-<version>.jar` | ImageJ plugin with native codecs and HDF5 decoders for all five platforms |
+| `radelta-imagej-<version>-fiji.zip` | Complete Fiji installation: Radelta JAR, HDF5 importer/dependencies and installer |
 
 Zarr wheels are tested in isolated installations before being uploaded.
 Linux builds use a glibc 2.28 baseline; macOS builds target 11.0 or later.
@@ -97,6 +99,11 @@ datasets using lossless or calibrated-lossy Radelta compression. Standard HDF5
 readers can access slices and regions with the plugin installed. The companion
 `radelta-hdf5` command imports TIFF stacks, exports TIFF stacks and recompresses
 existing HDF5 datasets. Native codec builds do not require HDF5.
+
+For ImageJ/Fiji, install the [complete Fiji bundle](imagej-plugin/FIJI_BUNDLE.md).
+The existing Radelta ImageJ JAR includes the HDF5 decoder and registers it
+automatically with the HDF5_Vibez/JHDF5 importer. No environment-variable
+configuration or second HDF5 SDK is needed.
 
 ## Building
 
@@ -182,6 +189,9 @@ Large datasets can be written in a bounded-memory streaming form. ImageJ opens t
 ## ImageJ/Fiji
 
 The plugin can open `.rdlt` / `.radelta` files and export datasets using either lossless or calibrated-lossy compression.
+It also opens Radelta-compressed HDF5 files through the existing Fiji HDF5
+importer, using the decoder bundled in the same JAR. Choose **Plugins → Radelta
+→ Open HDF5…**; `.rdlt` opening and export commands remain available.
 
 Opening from the Radelta menu, File > Open, or drag-and-drop offers a choice
 between a virtual stack (the default) and loading the entire dataset into RAM.
@@ -201,10 +211,13 @@ opaque metadata is retained when a Radelta file is edited and resaved. TIFF
 metadata from the CLI supplies common ImageJ/OME calibration on opening.
 Arbitrary Java objects, ROIs, and display LUTs are not serialized.
 
-To install, download the released `radelta-imagej-0.7.0.jar`, copy it into
-Fiji's `plugins` folder, and restart Fiji. Remove any older Radelta plugin JAR
-from that folder to avoid loading duplicate plugins. The release JAR includes
-native libraries for all supported platforms.
+For a complete installation, download `radelta-imagej-0.7.1-fiji.zip`, extract
+it, close Fiji and run `python install.py /path/to/Fiji.app`. The installer
+adds missing HDF5 dependencies, reuses existing reader libraries and disables
+older Radelta JARs. See [installation details](imagej-plugin/FIJI_BUNDLE.md).
+If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.1.jar`
+into Fiji's `plugins` folder, remove older Radelta JARs and restart Fiji.
+The release JAR includes both codecs and HDF5 decoders for all five platforms.
 
 To build the plugin from source, install Rust, JDK 17, and Maven. First build
 the native library using the commands above. Copy the shared library from
@@ -226,9 +239,14 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.7.0.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.7.1.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
+
+For HDF5 support in a manual build, also build the read-only HDF5 target and
+copy its library into `src/main/resources/hdf5/<platform>-<arch>/` before
+building the JAR. The [HDF5 build instructions](hdf5/README.md) describe that
+target. Reader dependencies are supplied by Fiji or the complete bundle.
 
 For development without bundling, set `RADELTA_NATIVE_LIBRARY` to the absolute
 path of the Cargo-built shared library before running Maven, and also in the

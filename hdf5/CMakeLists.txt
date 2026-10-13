@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(radelta_hdf5 VERSION 0.7.0 LANGUAGES C)
+project(radelta_hdf5 VERSION 0.7.1 LANGUAGES C)
 include(CTest)
 find_package(HDF5 1.8.15 REQUIRED COMPONENTS C)
 if(TARGET HDF5::HDF5)
@@ -53,6 +53,35 @@ else()
     target_compile_options(H5Zradelta PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 install(TARGETS H5Zradelta LIBRARY DESTINATION lib/hdf5/plugins RUNTIME DESTINATION lib/hdf5/plugins)
+
+# Read-only filter for existing native HDF5 readers, including Fiji/JHDF5.
+# Headers define the stable filter-plugin ABI; no HDF5 library is linked.
+add_library(H5Zradelta_fiji MODULE src/H5Zradelta.c)
+add_dependencies(H5Zradelta_fiji radelta_codec)
+set_target_properties(H5Zradelta_fiji PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED YES
+    OUTPUT_NAME H5Zradelta WINDOWS_EXPORT_ALL_SYMBOLS YES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fiji-plugins"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fiji-plugins"
+    MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+if(APPLE)
+    set_target_properties(H5Zradelta_fiji PROPERTIES SUFFIX ".dylib")
+endif()
+target_compile_definitions(H5Zradelta_fiji PRIVATE RADELTA_HDF5_DECODE_ONLY=1
+    RADELTA_HDF5_FILTER_ID=${RADELTA_HDF5_FILTER_ID})
+target_include_directories(H5Zradelta_fiji PRIVATE ${HDF5_INCLUDE_DIRS} "${RADELTA_ROOT}/native/include")
+target_link_libraries(H5Zradelta_fiji PRIVATE "${RUST_LIBRARY}")
+if(WIN32)
+    target_link_libraries(H5Zradelta_fiji PRIVATE ws2_32 userenv bcrypt ntdll)
+else()
+    target_link_libraries(H5Zradelta_fiji PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
+endif()
+if(MSVC)
+    target_compile_options(H5Zradelta_fiji PRIVATE /W4)
+else()
+    target_compile_options(H5Zradelta_fiji PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+install(TARGETS H5Zradelta_fiji LIBRARY DESTINATION lib/hdf5/fiji-plugins
+    RUNTIME DESTINATION lib/hdf5/fiji-plugins)
 if(BUILD_TESTING)
     add_executable(hdf5_roundtrip tests/roundtrip.c)
     target_include_directories(hdf5_roundtrip PRIVATE ${HDF5_INCLUDE_DIRS})
@@ -67,4 +96,18 @@ if(BUILD_TESTING)
         set_target_properties(hdf5_roundtrip PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
     endif()
     install(TARGETS hdf5_roundtrip RUNTIME DESTINATION bin)
+
+    add_executable(hdf5_fiji_fixture tests/fiji_fixture.c)
+    set_target_properties(hdf5_fiji_fixture PROPERTIES OUTPUT_NAME radelta-hdf5-fiji-fixture
+        C_STANDARD 99 C_STANDARD_REQUIRED YES)
+    target_include_directories(hdf5_fiji_fixture PRIVATE ${HDF5_INCLUDE_DIRS})
+    target_link_libraries(hdf5_fiji_fixture PRIVATE ${RADELTA_HDF5_LIBRARIES})
+    target_compile_options(hdf5_fiji_fixture PRIVATE ${HDF5_DEFINITIONS})
+    target_compile_definitions(hdf5_fiji_fixture PRIVATE RADELTA_HDF5_FILTER_ID=${RADELTA_HDF5_FILTER_ID})
+    if(APPLE)
+        set_target_properties(hdf5_fiji_fixture PROPERTIES INSTALL_RPATH "@loader_path/../lib")
+    elseif(UNIX)
+        set_target_properties(hdf5_fiji_fixture PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+    endif()
+    install(TARGETS hdf5_fiji_fixture RUNTIME DESTINATION bin)
 endif()

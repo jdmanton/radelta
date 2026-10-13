@@ -1,6 +1,6 @@
 # Radelta compression for HDF5
 
-This plugin stores ordinary chunked HDF5 datasets using Radelta 0.7.0.
+This plugin stores ordinary chunked HDF5 datasets using Radelta 0.7.1.
 Each chunk contains an RDL1/RDM2 lossless or RDLQ/RDQ2 calibrated-lossy stream.
 HDF5 handles indexing, metadata and partial reads; the filter only encodes pixels.
 The Rust codec is linked into the plugin, so readers do not need a separate
@@ -18,7 +18,10 @@ chunk is decoded in full. Lossy partial updates recompress the affected chunk.
 
 The [HDF5 builds workflow](../.github/workflows/hdf5-build.yml) produces
 Windows x86-64, Linux x86-64/ARM64 and macOS Intel/Apple Silicon packages.
-Each ZIP includes the matching shared HDF5 SDK and is tested after relocation.
+The read/write SDK ZIP includes the matching shared HDF5 runtime and is tested
+after relocation. The [complete Fiji bundle](FIJI.md) includes the decoder in
+the existing ImageJ JAR and supplies the HDF5_Vibez/JHDF5 importer dependencies.
+A standalone decoder ZIP is also available for other native HDF5 readers.
 See [download and use prebuilt packages](ONLINE_BUILDS.md). Tagged releases
 attach the packages automatically; manual Actions runs do not require a new tag.
 
@@ -58,6 +61,8 @@ $env:HDF5_PLUGIN_PATH = "$PWD/hdf5/build/plugins/Release"
 **Build against the same HDF5 installation used by the reader.** In particular,
 PyPI h5py wheels often bundle a different HDF5 library from the system library.
 Mixing two copies can invalidate the dataset handles passed to the callbacks.
+This applies to the full read/write filter. For Fiji, use the read-only
+`hdf5/build/fiji-plugins` target instead; see [Fiji installation](FIJI.md).
 Use an h5py build linked to your HDF5 installation, e.g.:
 
 ```sh

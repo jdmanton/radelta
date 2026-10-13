@@ -164,7 +164,7 @@ jobs:
 
   imagej:
     name: Universal ImageJ/Fiji plugin
-    needs: native
+    needs: [native, hdf5]
     runs-on: ubuntu-latest
 
     steps:
@@ -182,56 +182,38 @@ jobs:
           path: native-packages
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hdf5-*
+          path: hdf5-packages
+          merge-multiple: true
+
       - name: Add native libraries to ImageJ plugin
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          from zipfile import ZipFile
-
-          root = Path.cwd()
-          version = (root / "VERSION").read_text(encoding="utf-8").strip()
-          packages = root / "native-packages"
-          resources = root / "imagej-plugin" / "src" / "main" / "resources" / "natives"
-
-          targets = [
-              ("windows", "x86_64", "windows-x86_64", "radelta.dll"),
-              ("linux", "x86_64", "linux-x86_64", "libradelta.so"),
-              ("linux", "aarch64", "linux-aarch64", "libradelta.so"),
-              ("macos", "x86_64", "macos-x86_64", "libradelta.dylib"),
-              ("macos", "aarch64", "macos-aarch64", "libradelta.dylib"),
-          ]
-
-          for platform, arch, resource_dir, library_name in targets:
-              archive = packages / f"radelta-{version}-{platform}-{arch}.zip"
-              if not archive.is_file():
-                  raise SystemExit(f"Missing native package: {archive}")
-
-              destination = resources / resource_dir / library_name
-              destination.parent.mkdir(parents=True, exist_ok=True)
-
-              with ZipFile(archive) as zf:
-                  # The Python codec also bundles a copy of the native library.
-                  # ImageJ uses the library at the native package root.
-                  member = f"radelta-{version}-{platform}-{arch}/{library_name}"
-                  matches = [entry for entry in zf.infolist() if entry.filename == member]
-                  if len(matches) != 1:
-                      raise SystemExit(
-                          f"Expected one root library {member} in {archive}, found {len(matches)}"
-                      )
-                  destination.write_bytes(zf.read(matches[0]))
-
-              print(f"{archive.name}: {library_name} -> {destination}")
-          PY
+        run: >-
+          python scripts/stage_imagej_natives.py
+          --native-packages native-packages
+          --hdf5-packages hdf5-packages
 
       - name: Build universal plugin JAR
         working-directory: imagej-plugin
         run: mvn --batch-mode package
 
+      - name: Package complete Fiji installation
+        run: |
+          version=$(cat VERSION)
+          python scripts/package_imagej_fiji.py --jar "imagej-plugin/target/radelta-imagej-${version}.jar"
+
       - uses: actions/upload-artifact@v4
         with:
           name: imagej-universal
           path: imagej-plugin/target/radelta-imagej-*.jar
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: imagej-fiji-bundle
+          path: dist/radelta-imagej-*-fiji.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -252,6 +234,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: imagej-universal
+          path: release-assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: imagej-fiji-bundle
           path: release-assets
 
       - uses: actions/download-artifact@v4
