@@ -95,7 +95,7 @@ def create_dataset(group, name, *, shape=None, data=None, chunks=None,
     ds = group.create_dataset(name, shape=shape, dtype=dtype, chunks=chunks,
                               maxshape=maxshape, compression=filter_id, compression_opts=opts)
     ds.attrs["axes"] = "TCZYX"[-len(shape):]
-    ds.attrs["radelta_version"] = "0.7.5"
+    ds.attrs["radelta_version"] = "0.7.6"
     ds.attrs["radelta_lossy"] = bool(codec.get("lossy", False))
     if codec.get("lossy", False):
         for key, default in (("offset_adu", 0.0), ("gain_e_per_adu", 1.0), ("noise_step", 2.0)):
@@ -103,3 +103,7 @@ def create_dataset(group, name, *, shape=None, data=None, chunks=None,
     if data is not None:
         ds[...] = data
     return ds
+
+
+# Import after the filter helpers to keep the public API in one namespace.
+from .bdv import export_bdv  # noqa: E402

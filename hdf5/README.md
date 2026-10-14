@@ -1,6 +1,6 @@
 # Radelta compression for HDF5
 
-This plugin stores ordinary chunked HDF5 datasets using Radelta 0.7.5.
+This plugin stores ordinary chunked HDF5 datasets using Radelta 0.7.6.
 Each chunk contains an RDL1/RDM2 lossless or RDLQ/RDQ2 calibrated-lossy stream.
 HDF5 handles indexing, metadata and partial reads; the filter only encodes pixels.
 The Rust codec is linked into the plugin, so readers do not need a separate
@@ -146,6 +146,87 @@ relationships. Reference/variable-length object attributes must be copied
 explicitly and are rejected by this command. The source must already have canonical axes; an `axes` attribute
 with a different order is rejected. All three commands report progress and
 write through a temporary file. Existing outputs require `--overwrite`.
+
+## BigDataViewer export
+
+The `bdv` command writes standard BDV XML/HDF5 from a grayscale uint16 TIFF
+series or one HDF5 dataset. Each channel becomes a separate setup and each
+timepoint is preserved. Both lossless and calibrated-lossy exports use the
+existing Radelta filter; BDV reads tiles through its normal HDF5 loader.
+
+```sh
+radelta-hdf5 --plugin-path hdf5/build/plugins bdv input.tif sample.xml
+radelta-hdf5 --plugin-path hdf5/build/plugins bdv input.h5 sample.xml --dataset /images --voxel-size 2,0.5,0.5
+```
+
+**Chunks, voxel sizes and resolution factors are always Z,Y,X** in this CLI
+and the Python API. BDV's XML and mipmap tables use X,Y,Z; the exporter handles
+the reversal. Default tiles are `16,64,64`, clipped to each level's dimensions.
+Automatic pyramids stop when all dimensions are at most 256 pixels, reducing
+axes with finer physical sampling first. Small volumes may have only level zero.
+Override either setting explicitly:
+
+```sh
+radelta-hdf5 --plugin-path hdf5/build/plugins bdv input.tif sample.xml --chunks 16,128,128 --resolutions "1,1,1;1,2,2;2,4,4;4,8,8" --voxel-size 2,0.5,0.5 --unit um
+```
+
+Resolution factors are cumulative and must start at `1,1,1`. Each subsequent
+factor must be an integer multiple of the preceding factor. Pyramid steps use
+box averages of the previous level, replicate borders for incomplete edge
+blocks, and round half up to uint16. In lossy mode only level zero is quantised;
+coarser levels average its decoded values and are compressed losslessly. Already
+lossy HDF5 inputs are decoded as stored; lossless export cannot restore their
+original values, and another lossy export would quantise them again.
+
+OME-TIFF physical voxel sizes (supported metric units) and channel names,
+ImageJ TIFF spatial calibration, and HDF5 `element_size_um` are recognised.
+Without complete calibration the exporter uses unit voxels labelled `pixel`.
+`--voxel-size` supplies explicit spacing and defaults to micrometres; `--unit`
+changes the label without rescaling. Use `--axes` to override source axes and
+repeat `--channel-name` once per channel to override names. The exporter does
+not copy arbitrary acquisition metadata, existing registrations or other HDF5
+datasets, and does not represent physical time intervals in BDV's timepoint IDs.
+
+Export reports chunk progress and bounds working memory to tiles and HDF5
+caches. TIFF decoding additionally requires one complete XY plane; the decoded
+plane LRU cache defaults to 64 MiB (`--tiff-cache-mib 0` disables it). Expanded
+downsampling tiles are capped at 16 MiB of uint16 input, with bounded uint64
+accumulation workspace; output tile sizes shrink if needed. Very large jumps
+require intermediate pyramid levels. Source HDF5 chunking still determines
+how much data its reader decompresses per access.
+
+The output is `sample.xml` plus a uniquely named sibling such as
+`sample.abcd1234.h5`. Open **the XML** in Fiji using **Plugins → BigDataViewer →
+Open XML/HDF5**. Install the current Radelta Fiji bundle and restart Fiji first;
+its startup service registers the embedded filter with BDV's JHDF5 runtime.
+Do not point Fiji at the full HDF5 SDK filter. Scripts can initialise the
+decoder explicitly with `org.radelta.imagej.RadeltaHdf5.configure()`.
+
+Keep the XML and its referenced HDF5 file together when moving the dataset.
+The XML is published only after HDF5 writing completes, so failed exports do
+not replace complete results. `--overwrite` replaces the XML atomically and
+retains the previous HDF5 generation for existing readers. Remove old generations
+only after confirming that no XML file or reader still uses them.
+
+Python callers can use the same exporter and a progress callback:
+
+```python
+from radelta_hdf5 import configure_plugin, export_bdv
+
+configure_plugin("hdf5/build/plugins")
+xml_path, h5_path = export_bdv(
+    "input.h5", "sample.xml", dataset="/images",
+    voxel_size=(2, 0.5, 0.5), chunks=(16, 64, 64),
+    progress=lambda done, total: print(f"{done}/{total}"),
+)
+```
+
+The Python integration suite checks the pyramid pixels, unsigned values,
+calibration, axes, timepoints/channels, region reads, and publication failures.
+`scripts/test_bdv.py --plugin-path ... --fiji-plugin-path ...` additionally runs
+the exported XML through Fiji's released BDV loader in a headless JVM, comparing
+every voxel at every level with independent reference data. It requires a JDK
+and downloads pinned reader JARs into a test cache.
 
 ## C and other HDF5 applications
 

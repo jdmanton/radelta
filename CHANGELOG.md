@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.6
+
+- `radelta-hdf5 bdv` exports TIFF stacks or HDF5 datasets to tiled,
+  multiresolution BigDataViewer XML/HDF5, preserving channels, timepoints and
+  supported spatial calibration without loading the whole volume;
+- automatic pyramids account for anisotropic voxels; lossy exports quantise
+  only the full-resolution level and compress coarser levels losslessly;
+- complete XML/HDF5 exports are published atomically through the XML file;
+  failed exports preserve existing results;
+- headless CI checks exported pixels, calibration and mipmap transforms with
+  Fiji's released BigDataViewer loader in both lossless and lossy modes.
+
 ## 0.7.5
 
 - dragging a Radelta HDF5 file onto Fiji, or opening it with File > Open, now

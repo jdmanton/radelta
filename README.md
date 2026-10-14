@@ -100,6 +100,10 @@ readers can access slices and regions with the plugin installed. The companion
 `radelta-hdf5` command imports TIFF stacks, exports TIFF stacks and recompresses
 existing HDF5 datasets. Native codec builds do not require HDF5.
 
+`radelta-hdf5 bdv input.tif output.xml` exports tiled, multiresolution
+BigDataViewer XML/HDF5 datasets without loading the whole volume. It also
+accepts an existing HDF5 dataset. See [BDV export](hdf5/README.md#bigdataviewer-export).
+
 For ImageJ/Fiji, install the [complete Fiji bundle](imagej-plugin/FIJI_BUNDLE.md).
 The existing Radelta ImageJ JAR includes the HDF5 decoder and registers it
 automatically with the HDF5_Vibez/JHDF5 importer. No environment-variable
@@ -220,11 +224,11 @@ exports preserve existing destinations. Virtual-stack decoding errors stop
 processing and export; unreadable planes are never replaced with black pixels.
 Saving over a virtual stack's source file, including an alias, is rejected.
 
-For a complete installation, download `radelta-imagej-0.7.5-fiji.zip`, extract
+For a complete installation, download `radelta-imagej-0.7.6-fiji.zip`, extract
 it, close Fiji and run `python install.py /path/to/Fiji.app`. The installer
 adds missing HDF5 dependencies, reuses existing reader libraries and disables
 older Radelta JARs. See [installation details](imagej-plugin/FIJI_BUNDLE.md).
-If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.5.jar`
+If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.6.jar`
 into Fiji's `plugins` folder, remove older Radelta JARs and restart Fiji.
 The release JAR includes both codecs and HDF5 decoders for all five platforms.
 
@@ -248,7 +252,7 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.7.5.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.7.6.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
 

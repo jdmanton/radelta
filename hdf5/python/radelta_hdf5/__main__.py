@@ -1,4 +1,4 @@
-"""TIFF import/export and HDF5 dataset recompression without a full-volume copy."""
+"""TIFF/HDF5 conversion and BDV export without a full-volume copy."""
 import argparse
 import itertools
 import math
@@ -137,7 +137,7 @@ def main(argv=None):
     parser.add_argument("--plugin-path", type=Path, help="directory containing the built HDF5 plugin")
     parser.add_argument("--filter-id", type=int, default=FILTER_ID)
     sub = parser.add_subparsers(dest="command", required=True)
-    for command in ("encode", "repack", "decode"):
+    for command in ("encode", "repack", "decode", "bdv"):
         p = sub.add_parser(command)
         p.add_argument("input", type=Path)
         p.add_argument("output", type=Path)
@@ -152,8 +152,20 @@ def main(argv=None):
             p.add_argument("--block-depth", type=int, default=4)
             p.add_argument("--context", choices=("mean", "mean-signs", "signed3", "signs"), default="mean")
             p.add_argument("--scale-bits", type=int, default=10)
-        if command == "encode":
+        if command in ("encode", "bdv"):
             p.add_argument("--axes", help="source TIFF axes, e.g. TZCYX")
+        if command == "bdv":
+            p.set_defaults(chunks=(16, 64, 64))
+            p.add_argument("--resolutions", type=lambda s: tuple(
+                tuple(int(n) for n in level.split(",")) for level in s.split(";")),
+                help="cumulative ZYX factors, e.g. '1,1,1;1,2,2;2,4,4'; default: automatic")
+            p.add_argument("--voxel-size", type=lambda s: tuple(float(n) for n in s.split(",")),
+                           help="Z,Y,X spacing; otherwise infer supported source calibration")
+            p.add_argument("--unit", help="voxel-size unit (explicit sizes default to um)")
+            p.add_argument("--channel-name", action="append", dest="channel_names",
+                           help="repeat once per channel; otherwise use OME names when available")
+            p.add_argument("--tiff-cache-mib", type=float, default=64,
+                           help="bounded decoded TIFF plane cache (default: 64 MiB)")
     args = parser.parse_args(argv)
     try:
         if args.plugin_path:
@@ -169,6 +181,22 @@ def main(argv=None):
                               gain_e_per_adu=args.gain_e_per_adu if args.gain_e_per_adu is not None else 1,
                               noise_step=args.noise_step, block_depth=args.block_depth,
                               context=args.context, scale_bits=args.scale_bits)
+        if args.command == "bdv":
+            from .bdv import export_bdv
+            reporter = None
+            def report(done, total):
+                nonlocal reporter
+                if reporter is None:
+                    reporter = Progress(total)
+                reporter.advance()
+            xml, h5 = export_bdv(args.input, args.output, dataset=args.dataset, axes=args.axes,
+                                chunks=args.chunks, resolutions=args.resolutions,
+                                voxel_size=args.voxel_size, unit=args.unit,
+                                channel_names=args.channel_names, tiff_cache_mib=args.tiff_cache_mib,
+                                overwrite=args.overwrite, filter_id=args.filter_id,
+                                progress=report, **args.codec)
+            print(f"Wrote {xml} and {h5} ({h5.stat().st_size:,} bytes)", file=sys.stderr)
+            return
         # Work in a sibling temporary file so failed conversions leave no partial
         # result and never replace a previously complete output.
         fd, temporary = tempfile.mkstemp(prefix=".radelta-", suffix=args.output.suffix,
