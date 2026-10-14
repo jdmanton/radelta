@@ -1,11 +1,11 @@
 package org.radelta.imagej;
 
-import ij.IJ;
 import ij.VirtualStack;
 import ij.process.ImageProcessor;
 import ij.process.ShortProcessor;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 
 final class RadeltaVirtualStack extends VirtualStack {
     private final RadeltaFile file;
@@ -49,8 +49,7 @@ final class RadeltaVirtualStack extends VirtualStack {
             ip.setSliceNumber(n);
             return ip;
         } catch (IOException e) {
-            IJ.handleException(e);
-            return new ShortProcessor(file.width, file.height);
+            throw new UncheckedIOException("Radelta plane C=" + (c + 1) + ", Z=" + (z + 1) + ", T=" + (t + 1) + " could not be decoded", e);
         }
     }
 

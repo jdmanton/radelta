@@ -116,7 +116,12 @@ radelta_writer_finish
 radelta_writer_close
 ```
 
-`radelta_writer_finish` fails if not all expected planes have been supplied. `radelta_writer_close` releases the writer resources.
+`radelta_writer_finish` fails if not all expected planes have been supplied.
+Writers stage pixels and metadata in a sibling temporary file; the destination
+is created or replaced only when finish succeeds. Closing an unfinished writer
+discards the temporary file and preserves any previous destination.
+`radelta_writer_close` releases the writer resources. The destination directory
+must have space for the complete temporary output alongside an existing file.
 
 ## Opaque metadata
 

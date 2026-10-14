@@ -6,15 +6,19 @@ import com.sun.jna.ptr.PointerByReference;
 import java.io.Closeable;
 import java.io.IOException;
 import java.math.BigInteger;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
 final class RadeltaFile implements Closeable {
     private Pointer handle;
+    final Path sourcePath;
     final int width, height, slices, channels, frames;
     final int format, flags;
     final boolean lossy, streaming;
 
-    private RadeltaFile(Pointer handle, RadeltaNative.FileInfo info) throws IOException {
+    private RadeltaFile(Pointer handle, RadeltaNative.FileInfo info, String path) throws IOException {
         this.handle = handle;
+        this.sourcePath = Paths.get(path).toRealPath();
         this.width = positive(info.nx, "X");
         this.height = positive(info.ny, "Y");
         this.slices = positive(info.nz, "Z");
@@ -47,7 +51,7 @@ final class RadeltaFile implements Closeable {
             throw new IOException("Could not read Radelta metadata: " + RadeltaNative.lastError());
         }
         try {
-            return new RadeltaFile(h, info);
+            return new RadeltaFile(h, info, path);
         } catch (IOException e) {
             api.radelta_file_close(h);
             throw e;

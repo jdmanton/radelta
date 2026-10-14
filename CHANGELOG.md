@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.3
+
+- native CLI and streaming writers publish completed exports from sibling
+  temporary files; failures and unfinished writers preserve existing outputs;
+- CLI conversions and ImageJ virtual-stack exports reject source-file aliases,
+  including hard links; failed ImageJ plane reads propagate instead of returning
+  black pixels, and prevent export of corrupted images;
+- file and in-memory readers validate record counts against available bytes
+  before fallible index allocation; file opening also contains unexpected
+  panics at the C boundary.
+
 ## 0.7.2
 
 - **format change:** RDL1/RDLQ streams, and therefore every container that

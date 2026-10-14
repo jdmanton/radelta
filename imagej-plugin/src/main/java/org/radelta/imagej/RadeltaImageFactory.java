@@ -9,6 +9,7 @@ import ij.gui.GenericDialog;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.math.BigInteger;
 import java.util.Properties;
 
@@ -111,7 +112,12 @@ public final class RadeltaImageFactory {
 
     private static ImagePlus openVirtual(String path, final RadeltaFile rf) throws IOException {
         final RadeltaVirtualStack stack = new RadeltaVirtualStack(rf);
-        final ImagePlus base = new ImagePlus(new File(path).getName(), stack);
+        final ImagePlus base;
+        try {
+            base = new ImagePlus(new File(path).getName(), stack);
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
+        }
         configure(base, rf, path, "virtual");
         return base;
     }

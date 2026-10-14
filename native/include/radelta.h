@@ -204,6 +204,8 @@ int32_t radelta_file_read_plane_u16(
  * The writer always emits chunked out-of-core containers (RDS3 or RQS3) and
  * accepts input as sequential TCZ planes. Callers must provide planes in
  * increasing T,C,Z order. Memory use is bounded by the selected RAM budget.
+ * Pixels and metadata are staged in a sibling temporary file. Only successful
+ * finish creates/replaces the destination; close discards unfinished output.
  * ------------------------------------------------------------------------- */
 
 typedef struct radelta_writer_handle radelta_writer_handle;

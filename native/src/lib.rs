@@ -21,6 +21,8 @@ use std::fmt;
 use std::time::Instant;
 
 pub mod metadata;
+#[doc(hidden)]
+pub mod output;
 pub use metadata::{
     metadata_limit, read_file_metadata, read_metadata, set_file_metadata, set_metadata,
     set_metadata_limit, DEFAULT_METADATA_LIMIT_BYTES,
@@ -1979,7 +1981,16 @@ fn parse_lossless_stream(data: &[u8]) -> Result<ParsedLosslessStream<'_>> {
         return Err(RadeltaError("q context-table shape mismatch".into()));
     }
 
-    let mut blocks = Vec::with_capacity(nblocks);
+    // Minimum record: four u32 fields, eight rANS states and a CRC.
+    if nblocks > rd.data.len().saturating_sub(rd.pos) / 52 {
+        return Err(RadeltaError(
+            "RDL1 block count exceeds available records".into(),
+        ));
+    }
+    let mut blocks = Vec::new();
+    blocks
+        .try_reserve_exact(nblocks)
+        .map_err(|_| RadeltaError("cannot allocate RDL1 block index".into()))?;
     for block_index in 0..nblocks {
         let start = rd.pos;
         let z0 = rd.u32()? as usize;
@@ -2183,7 +2194,16 @@ fn parse_lossy_stream(data: &[u8]) -> Result<ParsedLossyStream<'_>> {
         return Err(RadeltaError("lossy q model/header shape mismatch".into()));
     }
 
-    let mut blocks = Vec::with_capacity(nblocks);
+    // Minimum record: three u32 fields, four rANS states and a CRC.
+    if nblocks > rd.data.len().saturating_sub(rd.pos) / 32 {
+        return Err(RadeltaError(
+            "RDLQ block count exceeds available records".into(),
+        ));
+    }
+    let mut blocks = Vec::new();
+    blocks
+        .try_reserve_exact(nblocks)
+        .map_err(|_| RadeltaError("cannot allocate RDLQ block index".into()))?;
     for _ in 0..nblocks {
         let start = rd.pos;
         let z0 = rd.u32()? as usize;
@@ -2613,7 +2633,15 @@ fn decompress_nd_container_into(
         data,
         pos: header_pos,
     };
-    let mut slices: Vec<&[u8]> = Vec::with_capacity(nvol);
+    if nvol > data.len().saturating_sub(header_pos) / 28 {
+        return Err(RadeltaError(
+            "multidimensional volume count exceeds available records".into(),
+        ));
+    }
+    let mut slices: Vec<&[u8]> = Vec::new();
+    slices
+        .try_reserve_exact(nvol)
+        .map_err(|_| RadeltaError("cannot allocate multidimensional volume index".into()))?;
     for _ in 0..nvol {
         let len64 = rd.u64()?;
         let len = usize::try_from(len64)

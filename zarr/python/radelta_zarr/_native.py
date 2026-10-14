@@ -10,7 +10,7 @@ import zlib
 
 import numpy as np
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 CODEC_ID = "radelta.radelta"
 _FRAME = struct.Struct("<4sBBHQI")
 _CONTEXT = {"signed3": 0, "signs": 1, "mean": 2, "mean-signs": 3}

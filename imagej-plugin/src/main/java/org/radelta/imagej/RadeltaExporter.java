@@ -11,6 +11,9 @@ import ij.process.ShortProcessor;
 import ij.process.ByteProcessor;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 
 final class RadeltaExporter {
     private RadeltaExporter() {}
@@ -66,6 +69,7 @@ final class RadeltaExporter {
 
     static void saveLossless(ImagePlus imp, String path, int memoryMib) throws IOException {
         validateSupportedImage(imp);
+        validateDestination(imp, path);
         byte[] metadata = RadeltaMetadata.capture(imp);
         int nx = imp.getWidth();
         int ny = imp.getHeight();
@@ -94,6 +98,7 @@ final class RadeltaExporter {
     static void saveLossy(ImagePlus imp, String path, double offsetAdu, double gainEPerAdu,
                           double noiseStep, int memoryMib) throws IOException {
         validateSupportedImage(imp);
+        validateDestination(imp, path);
         if (!(Double.isFinite(offsetAdu) && Double.isFinite(gainEPerAdu) && gainEPerAdu > 0.0 &&
                 Double.isFinite(noiseStep) && noiseStep > 0.0)) {
             throw new IOException("Lossy parameters must be finite; gain and noise step must be > 0.");
@@ -134,7 +139,12 @@ final class RadeltaExporter {
             for (int c = 1; c <= nc; ++c) {
                 for (int z = 1; z <= nz; ++z) {
                     int index = imp.getStackIndex(c, z, t);
-                    short[] pixels = extractPlaneU16(stack, index);
+                    short[] pixels;
+                    try {
+                        pixels = extractPlaneU16(stack, index);
+                    } catch (UncheckedIOException e) {
+                        throw new IOException("Failed while reading source plane C=" + c + ", Z=" + z + ", T=" + t, e.getCause());
+                    }
                     int rc = RadeltaNative.api().radelta_writer_write_plane_u16(writerHandle, t - 1, c - 1, z - 1,
                             pixels, pixels.length);
                     check(rc, "Failed while writing plane C=" + c + ", Z=" + z + ", T=" + t);
@@ -179,6 +189,15 @@ final class RadeltaExporter {
         }
         if (imp.getWidth() <= 0 || imp.getHeight() <= 0) {
             throw new IOException("Image dimensions are invalid.");
+        }
+    }
+
+    private static void validateDestination(ImagePlus imp, String path) throws IOException {
+        if (imp.getStack() instanceof RadeltaVirtualStack) {
+            RadeltaFile source = ((RadeltaVirtualStack)imp.getStack()).getRadeltaFile();
+            if (Files.exists(Paths.get(path)) && Files.isSameFile(source.sourcePath, Paths.get(path))) {
+                throw new IOException("Output must be different from the virtual stack's source file");
+            }
         }
     }
 

@@ -14,6 +14,11 @@ radelta benchmark-lossy INPUT.tif --offset-adu O (--gain-e-per-adu G | --gain-ad
 
 Running `radelta` without sufficient arguments prints the command syntax.
 
+Conversions reject input/output aliases, including symlinks and hard links.
+They write a sibling temporary file and create or replace the destination only
+after pixels and metadata are complete. Failures preserve any previous output.
+Allow disk space for the temporary output alongside an existing destination.
+
 All commands accept `--metadata-limit-mib N` (default **1024 MiB**). This controls
 both metadata extraction/writing and reading, including TIFF tag values. It is
 separate from the streaming image-buffer budget (`--memory-mib`). Zero rejects

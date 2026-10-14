@@ -1241,7 +1241,8 @@ fn encode_streaming_lossless(
         .ok_or("chunk count overflow")?;
 
     let mut planes = PlaneReader::open(input, info)?;
-    let file = File::create(output).map_err(|e| e.to_string())?;
+    let (mut pending, file) =
+        radelta_native::output::PendingOutput::create(output).map_err(|e| e.to_string())?;
     let mut out = BufWriter::new(file);
     stream_header(&mut out, STREAM_MAGIC_LOSSLESS, d, chunk_z, chunk_count)?;
     out.flush().map_err(|e| e.to_string())?;
@@ -1316,8 +1317,12 @@ fn encode_streaming_lossless(
     println!("Saving TIFF metadata...");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
     let metadata = tiff_metadata::capture(input, &info.layout)?;
-    radelta_native::set_file_metadata(output, &metadata).map_err(|e| e.to_string())?;
-    let total = fs::metadata(output).map_err(|e| e.to_string())?.len() as usize;
+    drop(out);
+    radelta_native::set_file_metadata(pending.path(), &metadata).map_err(|e| e.to_string())?;
+    let total = fs::metadata(pending.path())
+        .map_err(|e| e.to_string())?
+        .len() as usize;
+    pending.publish().map_err(|e| e.to_string())?;
     let secs = start.elapsed().as_secs_f64();
     println!("Wrote {} ({:.3} MiB)", output.display(), mib(total));
     println!(
@@ -1363,7 +1368,8 @@ fn encode_streaming_lossy(
         .ok_or("chunk count overflow")?;
 
     let mut planes = PlaneReader::open(input, info)?;
-    let file = File::create(output).map_err(|e| e.to_string())?;
+    let (mut pending, file) =
+        radelta_native::output::PendingOutput::create(output).map_err(|e| e.to_string())?;
     let mut out = BufWriter::new(file);
     stream_header(&mut out, STREAM_MAGIC_LOSSY, d, chunk_z, chunk_count)?;
     out.flush().map_err(|e| e.to_string())?;
@@ -1436,8 +1442,12 @@ fn encode_streaming_lossy(
     println!("Saving TIFF metadata...");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
     let metadata = tiff_metadata::capture(input, &info.layout)?;
-    radelta_native::set_file_metadata(output, &metadata).map_err(|e| e.to_string())?;
-    let total = fs::metadata(output).map_err(|e| e.to_string())?.len() as usize;
+    drop(out);
+    radelta_native::set_file_metadata(pending.path(), &metadata).map_err(|e| e.to_string())?;
+    let total = fs::metadata(pending.path())
+        .map_err(|e| e.to_string())?
+        .len() as usize;
+    pending.publish().map_err(|e| e.to_string())?;
     let secs = start.elapsed().as_secs_f64();
     println!("Wrote {} ({:.3} MiB)", output.display(), mib(total));
     println!(
@@ -1513,7 +1523,12 @@ fn write_encoded_with_metadata(
 ) -> Result<(), String> {
     let metadata = tiff_metadata::capture(input, layout)?;
     radelta_native::set_metadata(encoded, &metadata).map_err(|e| e.to_string())?;
-    fs::write(output, encoded).map_err(|e| e.to_string())
+    let (mut pending, mut file) =
+        radelta_native::output::PendingOutput::create(output).map_err(|e| e.to_string())?;
+    file.write_all(encoded).map_err(|e| e.to_string())?;
+    file.flush().map_err(|e| e.to_string())?;
+    drop(file);
+    pending.publish().map_err(|e| e.to_string())
 }
 
 fn load_dataset(path: &Path, ds: &DatasetArgs) -> Result<(Vec<u16>, ResolvedLayout), String> {
@@ -1784,6 +1799,14 @@ fn main() {
     if args.len() < 3 {
         usage();
     }
+    if matches!(args[1].as_str(), "encode" | "encode-lossy" | "decode") && args.len() >= 4 {
+        if let Err(e) =
+            radelta_native::output::ensure_distinct(Path::new(&args[2]), Path::new(&args[3]))
+        {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
     let result = match args[1].as_str() {
         "benchmark" | "benchmark-lossy" => {
             benchmark_args(&args[3..]).and_then(|(codec_args, repeats)| {
@@ -1961,8 +1984,11 @@ fn main() {
                     c: info.nc as usize,
                     t: info.nt as usize,
                 };
+                let (mut pending, reserved) = radelta_native::output::PendingOutput::create(output)
+                    .map_err(|e| e.to_string())?;
+                drop(reserved);
                 tiff_metadata::write(
-                    output,
+                    pending.path(),
                     d,
                     order.as_deref(),
                     file.metadata(),
@@ -1973,12 +1999,15 @@ fn main() {
                         file.read_plane(t, c, z, pixels)
                     },
                 )?;
+                let metadata_len = file.metadata().len();
+                drop(file);
+                pending.publish().map_err(|e| e.to_string())?;
                 println!("Wrote {}", output.display());
                 println!(
                     "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
                     d.t, d.c, d.z, d.y, d.x
                 );
-                println!("Metadata: {} bytes", file.metadata().len());
+                println!("Metadata: {} bytes", metadata_len);
                 Ok(())
             })
         }

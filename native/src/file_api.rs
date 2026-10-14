@@ -135,6 +135,7 @@ struct RadeltaStreamWriter {
     chunk_pixels: Vec<u16>,
     mode: WriterMode,
     out: BufWriter<File>,
+    pending_output: crate::output::PendingOutput,
     finished: bool,
     metadata: Vec<u8>,
 }
@@ -169,13 +170,15 @@ fn dims5(x: u32, y: u32, z: u32, c: u32, t: u32) -> std::result::Result<Dims5, S
     if x == 0 || y == 0 || z == 0 || c == 0 || t == 0 {
         return Err("Radelta dimensions must all be non-zero".into());
     }
-    Ok(Dims5 {
+    let dims = Dims5 {
         x: x as usize,
         y: y as usize,
         z: z as usize,
         c: c as usize,
         t: t as usize,
-    })
+    };
+    dims.validate().map_err(|e| e.to_string())?;
+    Ok(dims)
 }
 
 fn stream_header<W: Write>(
@@ -303,7 +306,16 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
             return Err("RDM2/RDQ2 volume count does not match T*C".into());
         }
         let lossy = &magic == MAGIC_ND_LOSSY;
-        let mut streams = Vec::with_capacity(nvol);
+        // Each record needs a length and at least an embedded volume header.
+        // Check file bounds before trusting a count as an allocation size.
+        let remaining = len.saturating_sub(file.stream_position().map_err(|e| e.to_string())?);
+        if nvol as u64 > remaining / (8 + PAYLOAD_HEADER_BYTES) {
+            return Err("multidimensional volume count exceeds available file records".into());
+        }
+        let mut streams = Vec::new();
+        streams
+            .try_reserve_exact(nvol)
+            .map_err(|_| "cannot allocate Radelta volume index")?;
         for _ in 0..nvol {
             let slen = read_u64(&mut file).map_err(|e| e.to_string())?;
             let off = file.stream_position().map_err(|e| e.to_string())?;
@@ -373,7 +385,14 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
             ));
         }
         let lossy = &magic == STREAM_MAGIC_LOSSY;
-        let mut chunks = Vec::with_capacity(nchunks_usize);
+        let remaining = len.saturating_sub(file.stream_position().map_err(|e| e.to_string())?);
+        if nchunks > remaining / (24 + PAYLOAD_HEADER_BYTES) {
+            return Err("streaming chunk count exceeds available file records".into());
+        }
+        let mut chunks = Vec::new();
+        chunks
+            .try_reserve_exact(nchunks_usize)
+            .map_err(|_| "cannot allocate Radelta chunk index")?;
         for index in 0..nchunks_usize {
             let t = read_u32(&mut file).map_err(|e| e.to_string())? as usize;
             let c = read_u32(&mut file).map_err(|e| e.to_string())? as usize;
@@ -455,7 +474,10 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
 
 fn read_payload(file: &mut File, seg: Segment) -> std::result::Result<Vec<u8>, String> {
     let len = usize::try_from(seg.len).map_err(|_| "compressed payload exceeds platform limits")?;
-    let mut buf = vec![0u8; len];
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| "cannot allocate compressed Radelta payload")?;
+    buf.resize(len, 0);
     file.seek(SeekFrom::Start(seg.offset))
         .map_err(|e| e.to_string())?;
     file.read_exact(&mut buf).map_err(|e| e.to_string())?;
@@ -631,12 +653,15 @@ impl RadeltaStreamWriter {
             .checked_mul(dims.c as u64)
             .and_then(|v| v.checked_mul(chunks_per_volume as u64))
             .ok_or("chunk count overflow")?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .write(true)
-            .open(&path)
+        let mut chunk_pixels = Vec::new();
+        chunk_pixels
+            .try_reserve_exact(
+                plane_voxels
+                    .checked_mul(chunk_z)
+                    .ok_or("chunk buffer size overflow")?,
+            )
+            .map_err(|_| "cannot allocate Radelta writer chunk buffer")?;
+        let (pending_output, file) = crate::output::PendingOutput::create(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let mut out = BufWriter::new(file);
         let magic = match mode {
@@ -656,13 +681,10 @@ impl RadeltaStreamWriter {
             chunk_t: 0,
             chunk_c: 0,
             chunk_z0: 0,
-            chunk_pixels: Vec::with_capacity(
-                plane_voxels
-                    .checked_mul(chunk_z)
-                    .ok_or("chunk buffer size overflow")?,
-            ),
+            chunk_pixels,
             mode,
             out,
+            pending_output,
             finished: false,
             metadata: Vec::new(),
         })
@@ -772,6 +794,7 @@ impl RadeltaStreamWriter {
             crate::metadata::set_file_handle_metadata(self.out.get_mut(), &self.metadata)
                 .map_err(|e| e.to_string())?;
         }
+        self.pending_output.publish().map_err(|e| e.to_string())?;
         self.finished = true;
         Ok(())
     }
@@ -799,14 +822,18 @@ pub unsafe extern "C" fn radelta_file_open(
             return RADELTA_INVALID_ARGUMENT;
         }
     };
-    match open_impl(path) {
-        Ok(handle) => {
+    match std::panic::catch_unwind(|| open_impl(path)) {
+        Ok(Ok(handle)) => {
             *out_handle = Box::into_raw(Box::new(handle));
             RADELTA_OK
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             set_last_error(e);
             RADELTA_IO_ERROR
+        }
+        Err(_) => {
+            set_last_error("unexpected panic while opening Radelta file");
+            RADELTA_CODEC_ERROR
         }
     }
 }
@@ -1127,6 +1154,71 @@ pub unsafe extern "C" fn radelta_writer_set_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unfinished_writers_preserve_existing_destinations_and_remove_temporaries() {
+        let path = temp_path("abort-writer");
+        for existing in [false, true] {
+            if existing {
+                fs::write(&path, b"previous image").unwrap();
+            }
+            let temporary;
+            {
+                let mut writer = RadeltaStreamWriter::new(
+                    path.clone(),
+                    Dims5 {
+                        x: 2,
+                        y: 2,
+                        z: 2,
+                        c: 1,
+                        t: 1,
+                    },
+                    WriterMode::Lossless(Options::default()),
+                    1,
+                )
+                .unwrap();
+                temporary = writer.pending_output.path().to_path_buf();
+                writer.write_plane(0, 0, 0, &[1; 4]).unwrap();
+                assert!(writer.finish().is_err());
+                if existing {
+                    assert_eq!(fs::read(&path).unwrap(), b"previous image");
+                } else {
+                    assert!(!path.exists());
+                }
+            }
+            assert!(!temporary.exists());
+            if existing {
+                assert_eq!(fs::read(&path).unwrap(), b"previous image");
+                fs::remove_file(&path).unwrap();
+            }
+        }
+        fs::write(&path, b"previous image").unwrap();
+        {
+            let mut writer = RadeltaStreamWriter::new(
+                path.clone(),
+                Dims5 {
+                    x: 2,
+                    y: 2,
+                    z: 1,
+                    c: 1,
+                    t: 1,
+                },
+                WriterMode::Lossless(Options::default()),
+                1,
+            )
+            .unwrap();
+            writer.write_plane(0, 0, 0, &[42; 4]).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"previous image");
+            writer.finish().unwrap();
+            writer.finish().unwrap();
+        }
+        let reader = open_impl(path.clone()).unwrap();
+        let mut pixels = [0; 4];
+        reader.read_plane(0, 0, 0, &mut pixels).unwrap();
+        assert_eq!(pixels, [42; 4]);
+        drop(reader);
+        fs::remove_file(path).unwrap();
+    }
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
