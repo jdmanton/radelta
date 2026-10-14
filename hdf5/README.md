@@ -1,6 +1,6 @@
 # Radelta compression for HDF5
 
-This plugin stores ordinary chunked HDF5 datasets using Radelta 0.7.3.
+This plugin stores ordinary chunked HDF5 datasets using Radelta 0.7.4.
 Each chunk contains an RDL1/RDM2 lossless or RDLQ/RDQ2 calibrated-lossy stream.
 HDF5 handles indexing, metadata and partial reads; the filter only encodes pixels.
 The Rust codec is linked into the plugin, so readers do not need a separate
@@ -61,7 +61,7 @@ $env:HDF5_PLUGIN_PATH = "$PWD/hdf5/build/plugins/Release"
 **Build against the same HDF5 installation used by the reader.** In particular,
 PyPI h5py wheels often bundle a different HDF5 library from the system library.
 Mixing two copies can invalidate the dataset handles passed to the callbacks.
-This applies to the full read/write filter. For Fiji, use the read-only
+This applies to the full SDK filter. For Fiji, use the embedded
 `hdf5/build/fiji-plugins` target instead; see [Fiji installation](FIJI.md).
 Use an h5py build linked to your HDF5 installation, e.g.:
 
@@ -197,7 +197,9 @@ Creation parameters are eleven uint32 words:
 Zero parameters select lossless defaults. `set_local` appends X,Y,Z,C,T chunk
 extents (indices 11–15, omitted axes become one) and byte order (16: 0 little,
 1 big). These local parameters are derived from the dataset, not supplied chunk
-geometry. Schema version 1 accepts only the existing Radelta 0.5.1 formats.
+geometry. The embedded build used by Fiji has no `set_local` callback, since it
+makes no HDF5 calls: it encodes only datasets created with all 17 words,
+as the ImageJ plugin does, and fails writes otherwise. Schema version 1 accepts only the existing Radelta 0.5.1 formats.
 
 ## Tests
 

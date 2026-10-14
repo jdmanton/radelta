@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Test a relocated decoder ZIP with the full HDF5 SDK and released Fiji jars.
+"""Test a relocated embedded-filter ZIP with the full HDF5 SDK and released Fiji jars.
 
-Only test dependencies are downloaded; the decoder archive bundles no JVM,
-Fiji jars or second HDF5 runtime. SHA256 pins protect the CI inputs.
+The SDK and embedded filters each read what the other writes. With an ImageJ
+JAR, the plugin also writes datasets through Fiji's own HDF5 runtime; the SDK
+filter then checks them in a separate native process. Only test dependencies
+are downloaded; the filter archive bundles no JVM, Fiji jars or second HDF5
+runtime. SHA256 pins protect the CI inputs.
 """
 import argparse
 import hashlib
@@ -76,10 +79,15 @@ def main():
         if len(plugins) != 1 or len(list(plugins[0].iterdir())) != 1:
             raise RuntimeError("Expected one decoder library in the Fiji archive")
         fixture = work / "fixture.h5"
-        native_env["HDF5_PLUGIN_PATH"] = str(prefix / "lib" / "hdf5" / "plugins")
+        embedded = work / "embedded.h5"
+        sdk_plugins = str(prefix / "lib" / "hdf5" / "plugins")
+        native_env["HDF5_PLUGIN_PATH"] = sdk_plugins
         subprocess.run([str(fixture_tool), "write", str(fixture)], env=native_env, check=True)
         native_env["HDF5_PLUGIN_PATH"] = str(plugins[0])
         subprocess.run([str(fixture_tool), "read", str(fixture)], env=native_env, check=True)
+        subprocess.run([str(fixture_tool), "write-embedded", str(embedded)], env=native_env, check=True)
+        native_env["HDF5_PLUGIN_PATH"] = sdk_plugins
+        subprocess.run([str(fixture_tool), "read-sdk", str(embedded)], env=native_env, check=True)
         # The released JHDF5 jar has no Linux aarch64 native library. Keep the
         # standalone HDF5 decoder test on that runner; never pretend Fiji ran.
         if args.platform == "linux" and args.arch == "aarch64":
@@ -121,10 +129,22 @@ def main():
         java_env.pop("DYLD_LIBRARY_PATH", None)
         command = ["java", "-Djava.awt.headless=true", "-cp", str(classes) + os.pathsep + cp,
                    "FijiHdf5Test", str(fixture)]
+        written = work / "written"
         if plugin_jar:
-            command.append("--bundled")
+            command += ["--bundled", "--write-dir", str(written)]
         subprocess.run(command, env=java_env, check=True)
-    print("Relocated Fiji decoder package and existing importer passed", flush=True)
+        if plugin_jar:
+            # Datasets written by the plugin through JHDF5's runtime must decode
+            # identically with the HDF5 SDK and its own filter build.
+            native_env["HDF5_PLUGIN_PATH"] = sdk_plugins
+            entries = (written / "written.tsv").read_text(encoding="utf-8").splitlines()
+            if not entries:
+                raise RuntimeError("The ImageJ writer test listed no datasets")
+            for entry in entries:
+                filename, dataset, raw = entry.split("\t")
+                subprocess.run([str(fixture_tool), "compare", str(written / filename), dataset, str(written / raw)],
+                               env=native_env, check=True)
+    print("Relocated embedded filter package, existing importer and ImageJ writer passed", flush=True)
 
 
 if __name__ == "__main__":

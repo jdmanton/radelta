@@ -58,13 +58,14 @@ HDF5 import supports lossless and calibrated-lossy Radelta uint16 datasets,
 either byte order and ranks 2–5. Pixel spacing comes from the dataset's float
 `element_size_um` attribute in `Z,Y,X` order, in micrometres. HDF5_Vibez loads
 the selected dataset into RAM; it does not provide our `.rdlt` virtual-stack
-opening dialog. HDF5 encoding continues through the existing Radelta HDF5
-CLI/Python tools or `h5repack` with the full read/write filter.
+opening dialog. **Plugins → Radelta → Save as Radelta HDF5 (lossless)…** and
+**(lossy)…** write Radelta HDF5 datasets from Fiji; see
+[Writing from Fiji](../hdf5/FIJI.md#writing-from-fiji).
 
 The release JAR contains both native libraries for all five Radelta platforms.
 The supplied JHDF5 reader supports Windows x86-64, Linux x86-64 and macOS
-Intel/Apple Silicon. **Linux ARM64 HDF5 import needs a compatible JHDF5 native
-build**; the supplied JAR lacks it. `.rdlt` support is available on that platform.
+Intel/Apple Silicon. **Linux ARM64 HDF5 import and export need a compatible
+JHDF5 native build**; the supplied JAR lacks it. `.rdlt` support is available on that platform.
 Windows requires the Microsoft Visual C++ 2015–2022 x64 runtime. Fiji on macOS
 must use a decoder matching its Java architecture, including Rosetta sessions.
 

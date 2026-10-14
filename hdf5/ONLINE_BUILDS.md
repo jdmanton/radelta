@@ -28,10 +28,10 @@ smoke test runs `h5dump -V` and the native plugin-loading/5D round-trip/hypersla
 test before uploading each ZIP. The existing Linux HDF5 CI job separately runs
 the full Python file-conversion and filter integration suite.
 
-The Fiji ZIP contains only the read-only Radelta filter and documentation.
+The Fiji ZIP contains only the embedded Radelta filter and documentation.
 It is useful for configuring other native readers directly. For Fiji, prefer
 the complete `radelta-imagej-<version>-fiji.zip`: the Radelta JAR includes the
-decoder and registers it automatically, and the installation bundle includes
+filter and registers it automatically, and the installation bundle includes
 the importer/dependencies. See [Fiji installation](FIJI.md).
 Each workflow job tests the extracted decoder archive against its SDK, then
 runs headless Fiji/JHDF5 imports on the four platforms supported by the released

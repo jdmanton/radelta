@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(radelta_hdf5 VERSION 0.7.3 LANGUAGES C)
+project(radelta_hdf5 VERSION 0.7.4 LANGUAGES C)
 include(CTest)
 find_package(HDF5 1.8.15 REQUIRED COMPONENTS C)
 if(TARGET HDF5::HDF5)
@@ -54,8 +54,10 @@ else()
 endif()
 install(TARGETS H5Zradelta LIBRARY DESTINATION lib/hdf5/plugins RUNTIME DESTINATION lib/hdf5/plugins)
 
-# Read-only filter for existing native HDF5 readers, including Fiji/JHDF5.
-# Headers define the stable filter-plugin ABI; no HDF5 library is linked.
+# Embedded filter for applications that bundle their own HDF5, including
+# Fiji/JHDF5. It decodes any Radelta dataset and encodes datasets created with
+# all 17 filter parameters (as the ImageJ plugin does). Headers define the
+# stable filter-plugin ABI; no HDF5 library is linked.
 add_library(H5Zradelta_fiji MODULE src/H5Zradelta.c)
 add_dependencies(H5Zradelta_fiji radelta_codec)
 set_target_properties(H5Zradelta_fiji PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED YES
@@ -66,7 +68,7 @@ set_target_properties(H5Zradelta_fiji PROPERTIES C_STANDARD 99 C_STANDARD_REQUIR
 if(APPLE)
     set_target_properties(H5Zradelta_fiji PROPERTIES SUFFIX ".dylib")
 endif()
-target_compile_definitions(H5Zradelta_fiji PRIVATE RADELTA_HDF5_DECODE_ONLY=1
+target_compile_definitions(H5Zradelta_fiji PRIVATE RADELTA_HDF5_EMBEDDED=1
     RADELTA_HDF5_FILTER_ID=${RADELTA_HDF5_FILTER_ID})
 target_include_directories(H5Zradelta_fiji PRIVATE ${HDF5_INCLUDE_DIRS} "${RADELTA_ROOT}/native/include")
 target_link_libraries(H5Zradelta_fiji PRIVATE "${RUST_LIBRARY}")

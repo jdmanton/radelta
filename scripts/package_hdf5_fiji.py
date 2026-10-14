@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the standalone read-only HDF5 filter for Fiji's existing reader."""
+"""Package the standalone embedded HDF5 filter for Fiji's existing reader."""
 import argparse
 import hashlib
 import json
@@ -39,7 +39,7 @@ def main():
         (stage / "BUILD_INFO.json").write_text(json.dumps({
             "radelta_version": version, "platform": args.platform,
             "architecture": args.arch, "filter_id": 65024,
-            "encode_enabled": False, "decode_enabled": True,
+            "encode_enabled": True, "encode_requires_explicit_parameters": True, "decode_enabled": True,
             "hdf5_runtime_bundled": False, "tested_jhdf5_version": "19.04.1",
             "fiji_test_available": not (args.platform == "linux" and args.arch == "aarch64"),
         }, indent=2) + "\n", encoding="utf-8")

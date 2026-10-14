@@ -71,6 +71,32 @@ public class RadeltaExportSafetyTest {
     }
 
     @Test
+    public void hdf5SavesCannotOverwriteVirtualSources() throws Exception {
+        // The source check runs before any HDF5 work, so no HDF5 runtime is needed.
+        Path root = Files.createTempDirectory("radelta-hdf5-source-protection-");
+        ImagePlus virtual = null;
+        try {
+            Path source = writeImage(root);
+            byte[] original = Files.readAllBytes(source);
+            virtual = RadeltaImageFactory.openBase(source.toString());
+            Path link = root.resolve("source-link.h5");
+            Files.createLink(link, source);
+            for (Path target : new Path[] {source, link}) {
+                try { RadeltaHdf5.save(virtual, target.toString(), "/images"); fail("source alias was overwritten"); }
+                catch (IOException expected) { assertTrue(expected.getMessage().contains("source file")); }
+                try { RadeltaHdf5.saveLossy(virtual, target.toString(), "/images", 0, 1, 2); fail("source alias was overwritten"); }
+                catch (IOException expected) { assertTrue(expected.getMessage().contains("source file")); }
+                assertArrayEquals(original, Files.readAllBytes(target));
+            }
+            assertEquals(1002, ((short[])virtual.getStack().getPixels(3))[0]);
+            noTemporaryFiles(root);
+        } finally {
+            if (virtual != null) ((RadeltaVirtualStack)virtual.getStack()).close();
+            clean(root);
+        }
+    }
+
+    @Test
     public void corruptPlaneThrowsAndFailedExportsPreserveDestinations() throws Exception {
         Path root = Files.createTempDirectory("radelta-corrupt-export-");
         ImagePlus virtual = null;

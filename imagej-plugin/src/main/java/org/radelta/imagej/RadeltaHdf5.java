@@ -9,11 +9,11 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Locale;
 
-/** Register our bundled decoder in the reader's own HDF5 runtime. */
+/** Register our bundled filter in the reader's own HDF5 runtime, and read or write through it. */
 public final class RadeltaHdf5 {
     private static Path configuredDirectory;
 
-    private static Class<?> readerClass(String name) throws ClassNotFoundException {
+    static Class<?> readerClass(String name) throws ClassNotFoundException {
         return Class.forName(name, true, RadeltaHdf5.class.getClassLoader());
     }
 
@@ -55,7 +55,12 @@ public final class RadeltaHdf5 {
             if (available <= 0) throw new IOException("HDF5 could not load the bundled Radelta decoder");
             int flags = ((Number)h5.getMethod("H5Zget_filter_info", int.class).invoke(null, 65024)).intValue();
             if ((flags & 2) == 0) throw new IOException("The registered Radelta filter cannot decode images");
-            if ((flags & 1) != 0) throw new IOException("A full Radelta HDF5 filter is already registered. Clear the older HDF5_PLUGIN_PATH setting and restart Fiji.");
+            // The SDK filter links a second HDF5 runtime and older decoders cannot
+            // read checksummed data; only the bundled embedded build is safe here.
+            String name = new Hdf5Bindings().filterName(65024);
+            if (!name.endsWith(RadeltaHdf5Writer.EMBEDDED_SUFFIX))
+                throw new IOException("Another Radelta HDF5 filter (" + name + ") is already registered. " +
+                    "Clear any HDF5_PLUGIN_PATH setting and restart Fiji.");
             configuredDirectory = directory;
         } catch (ClassNotFoundException e) {
             throw new IOException("The HDF5 reader is missing. Install the Radelta Fiji bundle and restart Fiji.", e);
@@ -82,6 +87,40 @@ public final class RadeltaHdf5 {
             Throwable cause = e instanceof InvocationTargetException ? ((InvocationTargetException)e).getCause() : e;
             throw new IOException("Cannot open the HDF5 dataset: " + cause, cause);
         }
+    }
+
+    /**
+     * Save a grayscale image as a lossless Radelta HDF5 dataset, replacing
+     * {@code filename}. Hyperstacks use canonical TCZYX/CZYX/ZYX/YX axes; see
+     * {@link #save(ImagePlus, String, String, boolean, double, double, double, int, int, int)}.
+     */
+    public static void save(ImagePlus image, String filename, String dataset) throws IOException {
+        RadeltaHdf5Writer.write(image, filename, dataset, RadeltaHdf5Writer.Settings.lossless());
+    }
+
+    /** Save with camera-calibrated lossy compression; gain is in electrons per ADU. */
+    public static void saveLossy(ImagePlus image, String filename, String dataset,
+                                 double offsetAdu, double gainEPerAdu, double noiseStep) throws IOException {
+        RadeltaHdf5Writer.write(image, filename, dataset,
+            RadeltaHdf5Writer.Settings.lossy(offsetAdu, gainEPerAdu, noiseStep));
+    }
+
+    /**
+     * Save with explicit chunk extents. Zero selects the default extent:
+     * up to 4 planes in Z and 1024 pixels in Y and X, within 8 MiB per chunk.
+     * T and C chunks always hold one index. Lossy parameters are ignored
+     * when {@code lossy} is false.
+     */
+    public static void save(ImagePlus image, String filename, String dataset, boolean lossy,
+                            double offsetAdu, double gainEPerAdu, double noiseStep,
+                            int chunkZ, int chunkY, int chunkX) throws IOException {
+        RadeltaHdf5Writer.Settings settings = lossy ?
+            RadeltaHdf5Writer.Settings.lossy(offsetAdu, gainEPerAdu, noiseStep) :
+            RadeltaHdf5Writer.Settings.lossless();
+        settings.chunkZ = chunkZ;
+        settings.chunkY = chunkY;
+        settings.chunkX = chunkX;
+        RadeltaHdf5Writer.write(image, filename, dataset, settings);
     }
 
     static String nativeResource(String operatingSystem, String architecture) {

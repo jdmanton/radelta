@@ -83,7 +83,7 @@ Each version has one GitHub release with separate installation assets:
 | `radelta-<version>-<platform>-<arch>.zip` | CLI, C library/header, documentation and optional Zarr source package |
 | `radelta_zarr-<version>-py3-none-<platform>.whl` | Python Zarr codec/converter with the matching native library |
 | `radelta-hdf5-<version>-<platform>-<arch>.zip` | HDF5 filter, compatible runtime/tools and Python helpers |
-| `radelta-hdf5-fiji-<version>-<platform>-<arch>.zip` | Standalone read-only filter for native HDF5 readers |
+| `radelta-hdf5-fiji-<version>-<platform>-<arch>.zip` | Standalone embedded filter for HDF5 runtimes such as Fiji's |
 | `radelta-imagej-<version>.jar` | ImageJ plugin with native codecs and HDF5 decoders for all five platforms |
 | `radelta-imagej-<version>-fiji.zip` | Complete Fiji installation: Radelta JAR, HDF5 importer/dependencies and installer |
 
@@ -190,8 +190,11 @@ Large datasets can be written in a bounded-memory streaming form. ImageJ opens t
 
 The plugin can open `.rdlt` / `.radelta` files and export datasets using either lossless or calibrated-lossy compression.
 It also opens Radelta-compressed HDF5 files through the existing Fiji HDF5
-importer, using the decoder bundled in the same JAR. Choose **Plugins → Radelta
+importer, using the filter bundled in the same JAR. Choose **Plugins → Radelta
 → Open HDF5…**; `.rdlt` opening and export commands remain available.
+**Save as Radelta HDF5 (lossless)…** and **(lossy)…** write HDF5 datasets that
+Fiji, h5py and the `radelta-hdf5` tools can read; see
+[Writing from Fiji](hdf5/FIJI.md#writing-from-fiji).
 
 Opening from the Radelta menu, File > Open, or drag-and-drop offers a choice
 between a virtual stack (the default) and loading the entire dataset into RAM.
@@ -216,11 +219,11 @@ exports preserve existing destinations. Virtual-stack decoding errors stop
 processing and export; unreadable planes are never replaced with black pixels.
 Saving over a virtual stack's source file, including an alias, is rejected.
 
-For a complete installation, download `radelta-imagej-0.7.3-fiji.zip`, extract
+For a complete installation, download `radelta-imagej-0.7.4-fiji.zip`, extract
 it, close Fiji and run `python install.py /path/to/Fiji.app`. The installer
 adds missing HDF5 dependencies, reuses existing reader libraries and disables
 older Radelta JARs. See [installation details](imagej-plugin/FIJI_BUNDLE.md).
-If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.3.jar`
+If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.4.jar`
 into Fiji's `plugins` folder, remove older Radelta JARs and restart Fiji.
 The release JAR includes both codecs and HDF5 decoders for all five platforms.
 
@@ -244,11 +247,11 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.7.3.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.7.4.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
 
-For HDF5 support in a manual build, also build the read-only HDF5 target and
+For HDF5 support in a manual build, also build the embedded HDF5 target and
 copy its library into `src/main/resources/hdf5/<platform>-<arch>/` before
 building the JAR. The [HDF5 build instructions](hdf5/README.md) describe that
 target. Reader dependencies are supplied by Fiji or the complete bundle.

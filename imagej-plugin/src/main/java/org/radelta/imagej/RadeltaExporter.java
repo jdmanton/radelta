@@ -156,7 +156,7 @@ final class RadeltaExporter {
         }
     }
 
-    private static short[] extractPlaneU16(ImageStack stack, int oneBasedIndex) throws IOException {
+    static short[] extractPlaneU16(ImageStack stack, int oneBasedIndex) throws IOException {
         Object pixels = stack.getPixels(oneBasedIndex);
         if (pixels instanceof short[]) {
             return (short[]) pixels;
@@ -181,7 +181,7 @@ final class RadeltaExporter {
         throw new IOException("Radelta export currently supports only 8-bit and 16-bit grayscale stacks/hyperstacks.");
     }
 
-    private static void validateSupportedImage(ImagePlus imp) throws IOException {
+    static void validateSupportedImage(ImagePlus imp) throws IOException {
         if (imp == null) throw new IOException("No image is open.");
         int type = imp.getType();
         if (!(type == ImagePlus.GRAY8 || type == ImagePlus.GRAY16)) {
@@ -192,7 +192,7 @@ final class RadeltaExporter {
         }
     }
 
-    private static void validateDestination(ImagePlus imp, String path) throws IOException {
+    static void validateDestination(ImagePlus imp, String path) throws IOException {
         if (imp.getStack() instanceof RadeltaVirtualStack) {
             RadeltaFile source = ((RadeltaVirtualStack)imp.getStack()).getRadeltaFile();
             if (Files.exists(Paths.get(path)) && Files.isSameFile(source.sourcePath, Paths.get(path))) {

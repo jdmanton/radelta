@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.4
+
+- **Save as Radelta HDF5 (lossless/lossy)** in the ImageJ plugin, plus scriptable
+  `RadeltaHdf5.save`/`saveLossy`: datasets follow the `radelta-hdf5` layout
+  and attributes, with chosen chunk sizes, `element_size_um` calibration for
+  Fiji's importer, nested dataset paths and replace-on-success writes; like
+  `.rdlt` exports, saves refuse a virtual stack's source file and its hard
+  links, and stop on unreadable planes;
+- the bundled embedded filter now also encodes, when a dataset is created
+  with all 17 filter parameters; it still makes no HDF5 API calls. Fiji
+  identifies it by name and refuses other registered Radelta filters;
+- CI writes through the plugin on every JHDF5 platform, checks pixels, chunks,
+  filter parameters and attributes through JHDF5 and Fiji, re-reads every file
+  with the SDK filter, and cross-checks SDK and embedded encoders natively;
+
 ## 0.7.3
 
 - native CLI and streaming writers publish completed exports from sibling

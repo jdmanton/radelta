@@ -14,11 +14,17 @@
 #define LOCAL_COUNT 17
 #define PARAM_VERSION 1
 
-/* Fiji/JHDF5 embeds its own HDF5 library. A decoder does not need HDF5 API
- * calls: use the shared system C runtime and ship no second HDF5 runtime.
- * On Windows this target and supported JHDF5 19.04.1 both use the shared UCRT.
- * The ordinary read/write filter continues using HDF5's allocator. */
-#ifdef RADELTA_HDF5_DECODE_ONLY
+/* Fiji/JHDF5 embeds its own HDF5 library, so the embedded build makes no HDF5
+ * API calls: it uses the shared system C runtime and ships no second HDF5
+ * runtime. On Windows this target and supported JHDF5 19.04.1 both use the
+ * shared UCRT. The ordinary SDK filter continues using HDF5's allocator.
+ *
+ * Without HDF5 API calls the embedded build has no can_apply/set_local
+ * callbacks. It decodes any Radelta dataset, and encodes only when the
+ * dataset's creator supplies all LOCAL_COUNT parameters itself, as the ImageJ
+ * plugin does. Creating a dataset with only the OPTIONS_COUNT user options
+ * leaves the chunk geometry unknown, so every write then fails. */
+#ifdef RADELTA_HDF5_EMBEDDED
 #define FILTER_ALLOC(n) malloc(n)
 #define FILTER_FREE(p) free(p)
 #else
@@ -28,7 +34,8 @@
 
 /* cd_values: version, lossy, block depth, context, scale bits,
  * offset/gain/noise as low/high uint32 pairs, X,Y,Z,C,T, byte order (0 LE/1 BE).
- * The last six words are derived by set_local, never trusted from the caller. */
+ * The SDK filter derives the last six words in set_local and never trusts the
+ * caller's values. The embedded filter takes them from the dataset creator. */
 static double unpack_double(const unsigned *p) {
     uint64_t bits = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
     double value;
@@ -44,7 +51,7 @@ static int valid_options(const unsigned *p) {
         isfinite(unpack_double(p+9)) && unpack_double(p+9) > 0);
 }
 
-#ifndef RADELTA_HDF5_DECODE_ONLY
+#ifndef RADELTA_HDF5_EMBEDDED
 static htri_t can_apply(hid_t dcpl, hid_t type, hid_t space) {
     int rank = H5Sget_simple_extent_ndims(space);
     H5T_order_t order = H5Tget_order(type);
@@ -92,6 +99,7 @@ static herr_t set_local(hid_t dcpl, hid_t type, hid_t space) {
     return H5Pmodify_filter(dcpl, RADELTA_HDF5_FILTER_ID,
         flags & ~H5Z_FLAG_OPTIONAL, LOCAL_COUNT, p);
 }
+#endif
 
 static void decode_pixels(const uint8_t *bytes, uint16_t *pixels, size_t n, int big) {
     size_t i;
@@ -99,7 +107,6 @@ static void decode_pixels(const uint8_t *bytes, uint16_t *pixels, size_t n, int 
         (uint16_t)(((uint16_t)bytes[2*i] << 8) | bytes[2*i+1]) :
         (uint16_t)(bytes[2*i] | ((uint16_t)bytes[2*i+1] << 8));
 }
-#endif
 
 static void encode_pixels(const uint16_t *pixels, uint8_t *bytes, size_t n, int big) {
     size_t i;
@@ -146,9 +153,6 @@ static size_t filter(unsigned flags, size_t count, const unsigned p[],
         encode_pixels(pixels, result, voxels, p[16]);
         result_size = bytes;
     } else {
-#ifdef RADELTA_HDF5_DECODE_ONLY
-        return 0;
-#else
         radelta_options opts = {p[2], p[3], p[4]};
         radelta_lossy_options lossy = {p[2], p[3], p[4],
             unpack_double(p+5), unpack_double(p+7), unpack_double(p+9)};
@@ -163,7 +167,6 @@ static size_t filter(unsigned flags, size_t count, const unsigned p[],
         result = FILTER_ALLOC(result_size);
         if (!result) goto failure;
         memcpy(result, encoded, result_size);
-#endif
     }
     FILTER_FREE(pixels);
     radelta_buffer_free(encoded, encoded ? result_size : 0);
@@ -179,12 +182,13 @@ failure:
 }
 
 static const H5Z_class2_t cls = {
-#ifdef RADELTA_HDF5_DECODE_ONLY
-    H5Z_CLASS_T_VERS, RADELTA_HDF5_FILTER_ID, 0, 1,
-    "Radelta 0.7.3 (uint16 TCZYX, decoder)", NULL, NULL, filter
+#ifdef RADELTA_HDF5_EMBEDDED
+    /* The ImageJ plugin identifies this build by the ", embedded)" suffix. */
+    H5Z_CLASS_T_VERS, RADELTA_HDF5_FILTER_ID, 1, 1,
+    "Radelta 0.7.4 (uint16 TCZYX, embedded)", NULL, NULL, filter
 #else
     H5Z_CLASS_T_VERS, RADELTA_HDF5_FILTER_ID, 1, 1,
-    "Radelta 0.7.3 (uint16 TCZYX)", can_apply, set_local, filter
+    "Radelta 0.7.4 (uint16 TCZYX)", can_apply, set_local, filter
 #endif
 };
 H5PL_type_t H5PLget_plugin_type(void) { return H5PL_TYPE_FILTER; }
