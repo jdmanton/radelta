@@ -395,6 +395,56 @@ struct BorrowedEncodedBlock<'a> {
     r_states: [u32; LANES],
     q_bytes: &'a [u8],
     r_bytes: &'a [u8],
+    /// The complete serialized block record covered by `crc`.
+    record: &'a [u8],
+    crc: u32,
+}
+
+impl BorrowedEncodedBlock<'_> {
+    /// Check the block's CRC-32. Called from the parallel decoders so that
+    /// verification scales with decoding rather than adding a serial pass.
+    fn verify(&self) -> Result<()> {
+        if crc32fast::hash(self.record) != self.crc {
+            return Err(RadeltaError("block checksum mismatch".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Byte range of the u16 `flags` field in every Radelta header. Metadata can
+/// be attached or removed without re-encoding pixels by changing its flag, so
+/// header checksums skip these two bytes; the metadata footer is checked
+/// separately.
+const FLAGS_FIELD: std::ops::Range<usize> = 6..8;
+
+/// CRC-32 of a stream header and models, `bytes[..end]`, excluding `flags`.
+fn header_crc(bytes: &[u8], end: usize) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&bytes[..FLAGS_FIELD.start]);
+    hasher.update(&bytes[FLAGS_FIELD.end..end]);
+    hasher.finalize()
+}
+
+/// Append the header CRC-32 after the serialized models.
+fn put_header_crc(out: &mut Vec<u8>) {
+    let crc = header_crc(out, out.len());
+    put_u32(out, crc);
+}
+
+/// Append the CRC-32 of the block record written since `start`.
+fn put_block_crc(out: &mut Vec<u8>, start: usize) {
+    let crc = crc32fast::hash(&out[start..]);
+    put_u32(out, crc);
+}
+
+/// Read and check the header CRC-32 that follows the serialized models.
+fn check_header_crc(rd: &mut Reader<'_>, what: &str) -> Result<()> {
+    let end = rd.pos;
+    let stored = rd.u32()?;
+    if header_crc(rd.data, end) != stored {
+        return Err(RadeltaError(format!("{what} header checksum mismatch")));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1672,8 +1722,10 @@ pub fn compress_lossy_u16_with_stats(
     put_u32(&mut out, q_model_blob.len() as u32);
     put_u32(&mut out, encoded.len() as u32);
     out.extend_from_slice(&q_model_blob);
+    put_header_crc(&mut out);
 
     for b in &encoded {
+        let start = out.len();
         put_u32(&mut out, b.z0 as u32);
         put_u32(&mut out, b.depth as u32);
         put_u32(&mut out, b.q_bytes.len() as u32);
@@ -1681,6 +1733,7 @@ pub fn compress_lossy_u16_with_stats(
             put_u32(&mut out, st);
         }
         out.extend_from_slice(&b.q_bytes);
+        put_block_crc(&mut out, start);
     }
 
     let stats = CompressionStats {
@@ -1800,8 +1853,10 @@ pub fn compress_u16_with_stats(
     put_u32(&mut out, encoded.len() as u32);
     out.extend_from_slice(&q_model_blob);
     out.extend_from_slice(&r_model_blob);
+    put_header_crc(&mut out);
 
     for b in &encoded {
+        let start = out.len();
         put_u32(&mut out, b.z0 as u32);
         put_u32(&mut out, b.depth as u32);
         put_u32(&mut out, b.q_bytes.len() as u32);
@@ -1814,6 +1869,7 @@ pub fn compress_u16_with_stats(
         }
         out.extend_from_slice(&b.q_bytes);
         out.extend_from_slice(&b.r_bytes);
+        put_block_crc(&mut out, start);
     }
 
     let stats = CompressionStats {
@@ -1903,8 +1959,11 @@ fn parse_lossless_stream(data: &[u8]) -> Result<ParsedLosslessStream<'_>> {
         )));
     }
 
-    let q_model = StaticModel::deserialize(rd.take(q_model_len)?)?;
-    let r_model = StaticModel::deserialize(rd.take(r_model_len)?)?;
+    let q_model_blob = rd.take(q_model_len)?;
+    let r_model_blob = rd.take(r_model_len)?;
+    check_header_crc(&mut rd, "RDL1")?;
+    let q_model = StaticModel::deserialize(q_model_blob)?;
+    let r_model = StaticModel::deserialize(r_model_blob)?;
     if q_model.scale_bits != scale_bits || r_model.scale_bits != scale_bits {
         return Err(RadeltaError("model/header scale-bit mismatch".into()));
     }
@@ -1922,6 +1981,7 @@ fn parse_lossless_stream(data: &[u8]) -> Result<ParsedLosslessStream<'_>> {
 
     let mut blocks = Vec::with_capacity(nblocks);
     for block_index in 0..nblocks {
+        let start = rd.pos;
         let z0 = rd.u32()? as usize;
         let depth = rd.u32()? as usize;
         let q_len = rd.u32()? as usize;
@@ -1943,12 +2003,16 @@ fn parse_lossless_stream(data: &[u8]) -> Result<ParsedLosslessStream<'_>> {
         }
         let q_bytes = rd.take(q_len)?;
         let r_bytes = rd.take(r_len)?;
+        let record = &data[start..rd.pos];
+        let crc = rd.u32()?;
         blocks.push(BorrowedEncodedBlock {
             depth,
             q_states,
             r_states,
             q_bytes,
             r_bytes,
+            record,
+            crc,
         });
     }
     if !rd.is_done() {
@@ -1994,6 +2058,7 @@ fn decode_lossless_stream_into(stream: &ParsedLosslessStream<'_>, out: &mut [u16
     out.par_chunks_mut(nominal_chunk_voxels)
         .zip(stream.blocks.par_iter())
         .try_for_each(|(chunk, block)| {
+            block.verify()?;
             if chunk.len() != block.depth * plane {
                 return Err(RadeltaError("decoded block/output layout mismatch".into()));
             }
@@ -2107,7 +2172,9 @@ fn parse_lossy_stream(data: &[u8]) -> Result<ParsedLossyStream<'_>> {
             "RDLQ block count {nblocks} does not match expected {expected_blocks}"
         )));
     }
-    let q_model = StaticModel::deserialize(rd.take(q_model_len)?)?;
+    let q_model_blob = rd.take(q_model_len)?;
+    check_header_crc(&mut rd, "RDLQ")?;
+    let q_model = StaticModel::deserialize(q_model_blob)?;
     if q_model.scale_bits != scale_bits {
         return Err(RadeltaError("model/header scale-bit mismatch".into()));
     }
@@ -2118,6 +2185,7 @@ fn parse_lossy_stream(data: &[u8]) -> Result<ParsedLossyStream<'_>> {
 
     let mut blocks = Vec::with_capacity(nblocks);
     for _ in 0..nblocks {
+        let start = rd.pos;
         let z0 = rd.u32()? as usize;
         let depth = rd.u32()? as usize;
         let q_len = rd.u32()? as usize;
@@ -2133,12 +2201,16 @@ fn parse_lossy_stream(data: &[u8]) -> Result<ParsedLossyStream<'_>> {
             *st = rd.u32()?;
         }
         let q_bytes = rd.take(q_len)?;
+        let record = &data[start..rd.pos];
+        let crc = rd.u32()?;
         blocks.push(BorrowedEncodedBlock {
             depth,
             q_states,
             r_states: [RANS_L; LANES],
             q_bytes,
             r_bytes: &[],
+            record,
+            crc,
         });
     }
     if !rd.is_done() {
@@ -2184,6 +2256,7 @@ fn decode_lossy_stream_into(stream: &ParsedLossyStream<'_>, out: &mut [u16]) -> 
     out.par_chunks_mut(chunk_voxels)
         .zip(stream.blocks.par_iter())
         .try_for_each(|(chunk, block)| {
+            block.verify()?;
             // Context prediction needs q throughout this block. Reconstruct only
             // after all its q symbols are decoded; blocks are independent.
             decode_q_block_into_packed(
@@ -2202,9 +2275,55 @@ fn decode_lossy_stream_into(stream: &ParsedLossyStream<'_>, out: &mut [u16]) -> 
     Ok(stream.dims)
 }
 
+/// Allocate a zeroed decode buffer, returning an error rather than aborting
+/// the process when a (possibly corrupted) header requests an impossible size.
+///
+/// Like `vec![0; n]`, this uses a zeroed allocation so untouched pages are not
+/// committed; a damaged stream that fails early therefore costs no memory.
+pub(crate) fn alloc_zeroed_u16(voxels: usize) -> Result<Vec<u16>> {
+    if voxels == 0 {
+        return Ok(Vec::new());
+    }
+    let layout = std::alloc::Layout::array::<u16>(voxels)
+        .map_err(|_| RadeltaError(format!("{voxels} decoded voxels exceed allocation limits")))?;
+    // SAFETY: the layout has non-zero size. A non-null result is a zeroed
+    // global allocation of exactly `voxels` u16 values, and all-zero bytes are
+    // valid u16 values, so it satisfies Vec::from_raw_parts with len == capacity.
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut u16;
+        if ptr.is_null() {
+            return Err(RadeltaError(format!(
+                "cannot allocate {voxels} decoded voxels ({} bytes)",
+                layout.size()
+            )));
+        }
+        Ok(Vec::from_raw_parts(ptr, voxels, voxels))
+    }
+}
+
+/// Decode a single-volume RDL1/RDLQ stream whose shape is already known from
+/// a container, checking its header before allocating any output.
+pub(crate) fn decompress_u16_expecting(data: &[u8], expected: Dims) -> Result<Vec<u16>> {
+    let found = inspect_dims(data)?;
+    if found != expected {
+        return Err(RadeltaError(format!(
+            "stream dimensions {}x{}x{} do not match expected {}x{}x{}",
+            found.x, found.y, found.z, expected.x, expected.y, expected.z
+        )));
+    }
+    let mut out = alloc_zeroed_u16(expected.voxels()?)?;
+    let decoded = decompress_u16_into(data, &mut out)?;
+    if decoded != expected {
+        return Err(RadeltaError(
+            "stream dimensions changed during decode".into(),
+        ));
+    }
+    Ok(out)
+}
+
 fn decompress_lossy_u16(data: &[u8]) -> Result<(Vec<u16>, Dims)> {
     let stream = parse_lossy_stream(data)?;
-    let mut out = vec![0u16; stream.dims.voxels()?];
+    let mut out = alloc_zeroed_u16(stream.dims.voxels()?)?;
     let dims = decode_lossy_stream_into(&stream, &mut out)?;
     Ok((out, dims))
 }
@@ -2219,7 +2338,7 @@ pub fn decompress_u16(data: &[u8]) -> Result<(Vec<u16>, Dims)> {
     }
     if &data[..4] == MAGIC {
         let stream = parse_lossless_stream(data)?;
-        let mut out = vec![0u16; stream.dims.voxels()?];
+        let mut out = alloc_zeroed_u16(stream.dims.voxels()?)?;
         let dims = decode_lossless_stream_into(&stream, &mut out)?;
         Ok((out, dims))
     } else if &data[..4] == MAGIC_LOSSY {
@@ -2571,7 +2690,7 @@ pub fn decompress_u16_nd_into(data: &[u8], output: &mut [u16]) -> Result<Dims5> 
 /// Decode RDL1/RDLQ or multidimensional RDM2/RDQ2 data into canonical TCZYX.
 pub fn decompress_u16_nd(data: &[u8]) -> Result<(Vec<u16>, Dims5)> {
     let dims = inspect_shape(data)?;
-    let mut out = vec![0u16; dims.voxels()?];
+    let mut out = alloc_zeroed_u16(dims.voxels()?)?;
     let decoded_dims = decompress_u16_nd_into(data, &mut out)?;
     Ok((out, decoded_dims))
 }
@@ -3380,6 +3499,113 @@ mod tests {
         let mut encoded = compress_u16_nd(&input, dims, Options::default()).unwrap();
         encoded.push(0);
         assert!(decompress_u16_nd(&encoded).is_err());
+    }
+
+    #[test]
+    fn damaged_dimensions_return_errors_instead_of_aborting() {
+        let dims = Dims { x: 23, y: 17, z: 9 };
+        let input = structured_volume(dims);
+        let lossy = LossyOptions {
+            offset_adu: 90.0,
+            gain_e_per_adu: 0.46,
+            ..LossyOptions::default()
+        };
+        for encoded in [
+            compress_u16(&input, dims, Options::default()).unwrap(),
+            compress_lossy_u16(&input, dims, lossy).unwrap(),
+        ] {
+            // X is the first dimension, after magic, version and flags. The
+            // header still parses, but now asks for over a terabyte of pixels.
+            let mut damaged = encoded.clone();
+            damaged[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(decompress_u16(&damaged).is_err());
+            assert!(decompress_u16_nd(&damaged).is_err());
+            assert!(decompress_u16_expecting(&damaged, dims).is_err());
+
+            // A container that expects another shape is rejected before decoding.
+            let other = Dims { x: 17, y: 23, z: 9 };
+            assert!(decompress_u16_expecting(&encoded, other).is_err());
+            let decoded = decompress_u16_expecting(&encoded, dims).unwrap();
+            assert_eq!(decoded, decompress_u16(&encoded).unwrap().0);
+        }
+        assert!(alloc_zeroed_u16(0).unwrap().is_empty());
+        assert!(alloc_zeroed_u16(usize::MAX).is_err());
+        assert!(alloc_zeroed_u16(5).unwrap().iter().all(|&v| v == 0));
+    }
+
+    /// Offsets of the `flags` bytes, which checksums deliberately skip, in a
+    /// single-volume stream or in each stream embedded in an RDM2/RDQ2 container.
+    fn flags_offsets(encoded: &[u8]) -> Vec<usize> {
+        let mut offsets = vec![6, 7];
+        if &encoded[..4] == MAGIC_ND || &encoded[..4] == MAGIC_ND_LOSSY {
+            let volumes = u32::from_le_bytes(encoded[28..32].try_into().unwrap()) as usize;
+            let mut pos = 32;
+            for _ in 0..volumes {
+                let len = u64::from_le_bytes(encoded[pos..pos + 8].try_into().unwrap()) as usize;
+                offsets.extend([pos + 8 + 6, pos + 8 + 7]);
+                pos += 8 + len;
+            }
+        }
+        offsets
+    }
+
+    #[test]
+    fn every_single_bit_flip_outside_flags_is_rejected() {
+        let dims = Dims { x: 9, y: 7, z: 5 };
+        let input = structured_volume(dims);
+        let (input5, dims5) = golden_rdm2_expected();
+        let options = Options {
+            block_depth: 2,
+            ..Options::default()
+        };
+        let lossy = LossyOptions {
+            block_depth: 2,
+            offset_adu: 90.0,
+            gain_e_per_adu: 0.46,
+            ..LossyOptions::default()
+        };
+        for encoded in [
+            compress_u16(&input, dims, options).unwrap(),
+            compress_lossy_u16(&input, dims, lossy).unwrap(),
+            compress_u16_nd(&input5, dims5, options).unwrap(),
+            compress_lossy_u16_nd(&input5, dims5, lossy).unwrap(),
+        ] {
+            assert!(decompress_u16_nd(&encoded).is_ok());
+            let skip = flags_offsets(&encoded);
+            for byte in (0..encoded.len()).filter(|b| !skip.contains(b)) {
+                for bit in 0..8 {
+                    let mut damaged = encoded.clone();
+                    damaged[byte] ^= 1 << bit;
+                    assert!(
+                        decompress_u16_nd(&damaged).is_err(),
+                        "{}: undetected flip at byte {byte}, bit {bit}",
+                        String::from_utf8_lossy(&encoded[..4])
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checksum_failures_name_the_damaged_part() {
+        let dims = Dims { x: 9, y: 7, z: 5 };
+        let input = structured_volume(dims);
+        let encoded = compress_u16(&input, dims, Options::default()).unwrap();
+        // The final byte belongs to the last block's CRC. Offset 31 is the
+        // reserved header byte, which no other check inspects.
+        for (offset, message) in [
+            (encoded.len() - 1, "block checksum mismatch"),
+            (31, "RDL1 header checksum mismatch"),
+        ] {
+            let mut damaged = encoded.clone();
+            damaged[offset] ^= 0x01;
+            let err = decompress_u16(&damaged).unwrap_err();
+            assert_eq!(err.0, message, "offset {offset}");
+        }
+        // Metadata changes only the flags field and the footer.
+        let mut with_metadata = encoded.clone();
+        set_metadata(&mut with_metadata, b"checked separately").unwrap();
+        assert_eq!(decompress_u16(&with_metadata).unwrap().0, input);
     }
 
     #[test]

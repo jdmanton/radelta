@@ -146,6 +146,7 @@ Header:
 | number of blocks | `u32` |
 | q model | variable |
 | r model | variable |
+| header CRC-32 | `u32` |
 
 Each block stores:
 
@@ -159,6 +160,22 @@ Each block stores:
 | four r rANS states | `4 * u32` |
 | q byte stack | variable |
 | r byte stack | variable |
+| block CRC-32 | `u32` |
+
+### Checksums
+
+All checksums are CRC-32/ISO-HDLC (as used by zlib and PNG). The header CRC
+covers every header byte from the magic to the end of the last model, except
+the two `flags` bytes at offsets 6–7. Attaching or removing metadata changes
+only that field, so it never requires recomputing pixel checksums; the
+metadata block carries its own checksum. Each block CRC covers that block's
+complete record, from its starting Z through its last byte-stack byte.
+
+Readers verify the header CRC before deserializing the models, and each block
+CRC immediately before decoding that block. Blocks are verified in parallel
+with decoding. A mismatch is a decoding error, never a silent substitution.
+The checksums guard against storage and transmission damage; they cover the
+encoded bytes rather than the reconstructed pixels.
 
 ## Calibrated-lossy single-volume file: RDLQ
 
@@ -182,7 +199,7 @@ ADU       = round(offset_adu + electrons / gain_e_per_adu)
 
 with the result clamped to `uint16`.
 
-The RDLQ header stores the XYZ dimensions, block/coder parameters, camera offset, gain, noise step, q model, and block count. Each block contains its Z position/depth, four q rANS states, and q byte stack.
+The RDLQ header stores the XYZ dimensions, block/coder parameters, camera offset, gain, noise step, q model, and block count, followed by a header CRC-32. Each block contains its Z position/depth, four q rANS states, and q byte stack, followed by a block CRC-32. Both checksums follow the RDL1 rules above.
 
 ## Multidimensional files: RDM2 and RDQ2
 
@@ -198,7 +215,7 @@ The header stores:
 | X, Y, Z, C, T | `5 * u32` |
 | number of volumes (`T*C`) | `u32` |
 
-Each `(T,C)` volume is then stored as an independent length-prefixed `RDL1` or `RDLQ` stream.
+Each `(T,C)` volume is then stored as an independent length-prefixed `RDL1` or `RDLQ` stream. The embedded streams carry their own checksums; container fields are cross-checked against them when reading (volume count, lengths and each stream's dimensions).
 
 ## Streaming files: RDS3 and RQS3
 
@@ -227,6 +244,10 @@ Chunks are written in increasing `T,C,Z` order. Each chunk contains:
 | `RDL1` or `RDLQ` payload | variable |
 
 The final chunk of a `(T,C)` volume may be shorter than the nominal chunk depth.
+
+As with RDM2/RDQ2, each payload carries its own checksums. Readers check each
+chunk record against the canonical layout and each payload header's dimensions
+against the container when opening the file.
 
 ## Static model serialization
 

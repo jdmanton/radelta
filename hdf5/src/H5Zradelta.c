@@ -181,10 +181,10 @@ failure:
 static const H5Z_class2_t cls = {
 #ifdef RADELTA_HDF5_DECODE_ONLY
     H5Z_CLASS_T_VERS, RADELTA_HDF5_FILTER_ID, 0, 1,
-    "Radelta 0.7.1 (uint16 TCZYX, decoder)", NULL, NULL, filter
+    "Radelta 0.7.2 (uint16 TCZYX, decoder)", NULL, NULL, filter
 #else
     H5Z_CLASS_T_VERS, RADELTA_HDF5_FILTER_ID, 1, 1,
-    "Radelta 0.7.1 (uint16 TCZYX)", can_apply, set_local, filter
+    "Radelta 0.7.2 (uint16 TCZYX)", can_apply, set_local, filter
 #endif
 };
 H5PL_type_t H5PLget_plugin_type(void) { return H5PL_TYPE_FILTER; }

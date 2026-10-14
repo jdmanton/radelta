@@ -65,8 +65,8 @@ To test a built JAR against installed HDF5 fixture tools:
 ```sh
 python scripts/test_hdf5_fiji.py --platform linux --arch x86_64 \
   --prefix _deps/hdf5-install \
-  --archive dist/radelta-hdf5-fiji-0.7.1-linux-x86_64.zip \
-  --imagej-jar imagej-plugin/target/radelta-imagej-0.7.1.jar
+  --archive dist/radelta-hdf5-fiji-0.7.2-linux-x86_64.zip \
+  --imagej-jar imagej-plugin/target/radelta-imagej-0.7.2.jar
 ```
 
 Tests require JDK 17 and download SHA256-pinned Fiji/SciJava dependencies.

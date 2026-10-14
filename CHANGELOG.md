@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.2
+
+- **format change:** RDL1/RDLQ streams, and therefore every container that
+  embeds them, carry a CRC-32 of the header and of each block. Corrupted
+  payloads are reported as errors instead of decoding to wrong pixels. Blocks
+  are verified in parallel with decoding. Files written by earlier versions
+  are no longer readable;
+- damaged dimension headers no longer abort the host process: file readers
+  check every embedded payload header against its container when opening,
+  decode into buffers sized from validated dimensions, and in-memory decoders
+  report impossible allocations as errors (affects the CLI and ImageJ plugin);
+
 ## 0.7.1
 
 - deterministic OME-Zarr concurrency tests for bounded reading and draining

@@ -454,7 +454,14 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
         }
         inverse
     });
-    let mut plane = vec![0; d.x * d.y];
+    // Fail with an error rather than aborting if a damaged header slipped
+    // past validation and still describes an impossible plane.
+    let plane_len = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
+    let mut plane: Vec<u16> = Vec::new();
+    plane
+        .try_reserve_exact(plane_len)
+        .map_err(|_| format!("cannot allocate a {}x{} plane buffer", d.x, d.y))?;
+    plane.resize(plane_len, 0);
     let mut generated = ome_description(d, order.unwrap_or("TCZ"));
     let described_order = order.unwrap_or("TCZ");
     let regular = mapping.iter().enumerate().all(|(p, &canonical)| {

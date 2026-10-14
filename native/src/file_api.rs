@@ -7,11 +7,11 @@
 //! compressed chunk containing a requested plane is decoded.
 
 use super::{
-    choose_stream_chunk_depth, compress_lossy_u16, compress_u16, decompress_u16, Dims, Dims5,
-    LossyOptions, Options, DEFAULT_BLOCK_DEPTH, DEFAULT_STREAM_MEMORY_MIB, LOSSY_VERSION, MAGIC,
-    MAGIC_LOSSY, MAGIC_ND, MAGIC_ND_LOSSY, ND_VERSION, RADELTA_CODEC_ERROR,
-    RADELTA_INVALID_ARGUMENT, RADELTA_OK, STREAM_MAGIC_LOSSLESS, STREAM_MAGIC_LOSSY,
-    STREAM_VERSION, VERSION,
+    choose_stream_chunk_depth, compress_lossy_u16, compress_u16, decompress_u16_expecting,
+    inspect_dims, Dims, Dims5, LossyOptions, Options, DEFAULT_BLOCK_DEPTH,
+    DEFAULT_STREAM_MEMORY_MIB, LOSSY_VERSION, MAGIC, MAGIC_LOSSY, MAGIC_ND, MAGIC_ND_LOSSY,
+    ND_VERSION, RADELTA_CODEC_ERROR, RADELTA_INVALID_ARGUMENT, RADELTA_OK, STREAM_MAGIC_LOSSLESS,
+    STREAM_MAGIC_LOSSY, STREAM_VERSION, VERSION,
 };
 use std::cell::RefCell;
 use std::ffi::CStr;
@@ -201,6 +201,39 @@ fn stream_header<W: Write>(
     Ok(())
 }
 
+/// Bytes needed to read an embedded RDL1/RDLQ header up to its dimensions.
+const PAYLOAD_HEADER_BYTES: u64 = 20;
+
+/// Check the RDL1/RDLQ header at the start of an embedded payload against the
+/// container. A file whose container and payload shapes disagree is rejected
+/// at open, before any caller sizes plane buffers from the container header.
+fn check_payload_header(
+    file: &mut File,
+    seg: Segment,
+    lossy: bool,
+    expected: Dims,
+) -> std::result::Result<(), String> {
+    if seg.len < PAYLOAD_HEADER_BYTES {
+        return Err("truncated Radelta payload header".into());
+    }
+    let mut header = [0u8; PAYLOAD_HEADER_BYTES as usize];
+    file.seek(SeekFrom::Start(seg.offset))
+        .map_err(|e| e.to_string())?;
+    file.read_exact(&mut header).map_err(|e| e.to_string())?;
+    let magic = if lossy { MAGIC_LOSSY } else { MAGIC };
+    if &header[..4] != magic {
+        return Err("Radelta payload mode does not match its container".into());
+    }
+    let found = inspect_dims(&header).map_err(|e| e.to_string())?;
+    if found != expected {
+        return Err(format!(
+            "Radelta payload dimensions {}x{}x{} do not match container {}x{}x{}",
+            found.x, found.y, found.z, expected.x, expected.y, expected.z
+        ));
+    }
+    Ok(())
+}
+
 fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
     let mut file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let len = file.metadata().map_err(|e| e.to_string())?.len();
@@ -269,6 +302,7 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
         if nvol != expected {
             return Err("RDM2/RDQ2 volume count does not match T*C".into());
         }
+        let lossy = &magic == MAGIC_ND_LOSSY;
         let mut streams = Vec::with_capacity(nvol);
         for _ in 0..nvol {
             let slen = read_u64(&mut file).map_err(|e| e.to_string())?;
@@ -279,16 +313,17 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
             if end > len {
                 return Err("truncated multidimensional Radelta substream".into());
             }
-            streams.push(Segment {
+            let seg = Segment {
                 offset: off,
                 len: slen,
-            });
+            };
+            check_payload_header(&mut file, seg, lossy, d.volume_dims())?;
+            streams.push(seg);
             file.seek(SeekFrom::Start(end)).map_err(|e| e.to_string())?;
         }
         if file.stream_position().map_err(|e| e.to_string())? != len {
             return Err("trailing bytes after Radelta volumes".into());
         }
-        let lossy = &magic == MAGIC_ND_LOSSY;
         return Ok(RadeltaFileHandle {
             metadata,
             dims: d,
@@ -337,6 +372,7 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
                 "streaming chunk count {nchunks_usize} does not match expected {expected}"
             ));
         }
+        let lossy = &magic == STREAM_MAGIC_LOSSY;
         let mut chunks = Vec::with_capacity(nchunks_usize);
         for index in 0..nchunks_usize {
             let t = read_u32(&mut file).map_err(|e| e.to_string())? as usize;
@@ -364,6 +400,19 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
             {
                 return Err("streaming Radelta chunks must follow canonical TCZ layout".into());
             }
+            check_payload_header(
+                &mut file,
+                Segment {
+                    offset: off,
+                    len: plen,
+                },
+                lossy,
+                Dims {
+                    x: d.x,
+                    y: d.y,
+                    z: depth,
+                },
+            )?;
             chunks.push(ChunkSegment {
                 t,
                 c,
@@ -377,7 +426,6 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
         if file.stream_position().map_err(|e| e.to_string())? != len {
             return Err("trailing bytes after Radelta chunks".into());
         }
-        let lossy = &magic == STREAM_MAGIC_LOSSY;
         return Ok(RadeltaFileHandle {
             metadata,
             dims: d,
@@ -464,16 +512,8 @@ impl RadeltaFileHandle {
                             len: *len,
                         },
                     )?;
-                    let (pixels, dd) = decompress_u16(&payload).map_err(|e| e.to_string())?;
-                    if dd
-                        != (Dims {
-                            x: d.x,
-                            y: d.y,
-                            z: d.z,
-                        })
-                    {
-                        return Err("single-volume dimensions changed during decode".into());
-                    }
+                    let pixels = decompress_u16_expecting(&payload, d.volume_dims())
+                        .map_err(|e| e.to_string())?;
                     *cache = Some(pixels);
                 }
                 let pixels = cache.as_ref().unwrap();
@@ -489,16 +529,8 @@ impl RadeltaFileHandle {
                 let miss = cache.as_ref().is_none_or(|v| v.key != key);
                 if miss {
                     let payload = read_payload(file, streams[key])?;
-                    let (pixels, dd) = decompress_u16(&payload).map_err(|e| e.to_string())?;
-                    if dd
-                        != (Dims {
-                            x: d.x,
-                            y: d.y,
-                            z: d.z,
-                        })
-                    {
-                        return Err("RDM2/RDQ2 substream dimensions do not match container".into());
-                    }
+                    let pixels = decompress_u16_expecting(&payload, d.volume_dims())
+                        .map_err(|e| format!("RDM2/RDQ2 substream: {e}"))?;
                     *cache = Some(CachedVolume { key, pixels });
                 }
                 let pixels = &cache.as_ref().unwrap().pixels;
@@ -532,16 +564,13 @@ impl RadeltaFileHandle {
                             len: ch.len,
                         },
                     )?;
-                    let (pixels, dd) = decompress_u16(&payload).map_err(|e| e.to_string())?;
-                    if dd
-                        != (Dims {
-                            x: d.x,
-                            y: d.y,
-                            z: ch.depth,
-                        })
-                    {
-                        return Err("RDS3/RQS3 chunk dimensions do not match container".into());
-                    }
+                    let expected = Dims {
+                        x: d.x,
+                        y: d.y,
+                        z: ch.depth,
+                    };
+                    let pixels = decompress_u16_expecting(&payload, expected)
+                        .map_err(|e| format!("RDS3/RQS3 chunk: {e}"))?;
                     *cache = Some(CachedChunk {
                         key,
                         z0: ch.z0,

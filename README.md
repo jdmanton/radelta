@@ -211,11 +211,11 @@ opaque metadata is retained when a Radelta file is edited and resaved. TIFF
 metadata from the CLI supplies common ImageJ/OME calibration on opening.
 Arbitrary Java objects, ROIs, and display LUTs are not serialized.
 
-For a complete installation, download `radelta-imagej-0.7.1-fiji.zip`, extract
+For a complete installation, download `radelta-imagej-0.7.2-fiji.zip`, extract
 it, close Fiji and run `python install.py /path/to/Fiji.app`. The installer
 adds missing HDF5 dependencies, reuses existing reader libraries and disables
 older Radelta JARs. See [installation details](imagej-plugin/FIJI_BUNDLE.md).
-If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.1.jar`
+If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.2.jar`
 into Fiji's `plugins` folder, remove older Radelta JARs and restart Fiji.
 The release JAR includes both codecs and HDF5 decoders for all five platforms.
 
@@ -239,7 +239,7 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.7.1.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.7.2.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
 
