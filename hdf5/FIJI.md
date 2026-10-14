@@ -8,9 +8,17 @@ importer and its reader dependencies. Extract that ZIP, close Fiji and run
 the complete bundle's `README.md`.
 
 If HDF5_Vibez/JHDF5 is already installed, replace the Radelta ImageJ JAR and
-restart Fiji. No `HDF5_PLUGIN_PATH` setting is needed. Open files through
-**Plugins → Radelta → Open HDF5…**, or **File → Import → HDF5…** in Fiji.
-For the `(186,613,860)` `/images` example, choose layout `zyx`.
+restart Fiji. No `HDF5_PLUGIN_PATH` setting is needed.
+
+Drag a `.h5`, `.hdf5` or `.he5` file containing Radelta-compressed datasets
+onto Fiji, or open it with **File → Open…**. A file with one such dataset and
+an `axes` attribute (as written by Fiji and the `radelta-hdf5` tools) opens
+directly. Otherwise a dialog lists the Radelta datasets and asks for the
+layout, defaulting to the `axes` attribute or to `yx`/`zyx`/`czyx`/`tczyx`
+by rank. HDF5 files without Radelta data are left to Fiji's other readers.
+HDF5_Vibez's own browser remains available through **Plugins → Radelta →
+Open HDF5…** or **File → Import → HDF5…**; for the `(186,613,860)` `/images`
+example, choose layout `zyx` there.
 
 Scripts can use the same integration without a graphical dialog:
 
@@ -18,6 +26,8 @@ Scripts can use the same integration without a graphical dialog:
 import org.radelta.imagej.RadeltaHdf5
 def image = RadeltaHdf5.open('/path/to/test_radelta.h5', '/images', 'zyx')
 image.show()
+// As File > Open does; asks only when the dataset or layout is ambiguous.
+def same = RadeltaHdf5.openFile('/path/to/test_radelta.h5')
 ```
 
 The importer supports uint16 data, both byte orders and ranks 2–5. Layouts
@@ -99,7 +109,10 @@ the ImageJ plugin's SciJava HDF5 service from its built JAR with
 `HDF5_PLUGIN_PATH` unset. It checks exact unsigned pixels, lossless/lossy
 reference images, both byte orders, ranks 2–5, padded edge chunks,
 multi-channel/time chunks, hyperstack axis ordering, physical calibration
-and chunk-crossing hyperslabs. The plugin then saves lossless and lossy
+and chunk-crossing hyperslabs. It checks which files the File → Open and
+drag-and-drop hook claims, through both of Fiji's opening routes, and that
+recorded layouts (including h5py's variable-length `axes`) open without a
+dialog. The plugin then saves lossless and lossy
 8/16-bit images of ranks 2–5 with edge chunks, nested groups and replacement;
 each is checked through JHDF5 (pixels, chunks, all filter parameters and
 attributes) and Fiji's importer, and the SDK filter re-reads it in a separate
@@ -110,8 +123,8 @@ To test a built JAR against installed HDF5 fixture tools:
 ```sh
 python scripts/test_hdf5_fiji.py --platform linux --arch x86_64 \
   --prefix _deps/hdf5-install \
-  --archive dist/radelta-hdf5-fiji-0.7.4-linux-x86_64.zip \
-  --imagej-jar imagej-plugin/target/radelta-imagej-0.7.4.jar
+  --archive dist/radelta-hdf5-fiji-0.7.5-linux-x86_64.zip \
+  --imagej-jar imagej-plugin/target/radelta-imagej-0.7.5.jar
 ```
 
 Tests require JDK 17 and download SHA256-pinned Fiji/SciJava dependencies.

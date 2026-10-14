@@ -5,6 +5,8 @@ import ij.ImagePlus;
 import org.scijava.Priority;
 import org.scijava.io.AbstractIOPlugin;
 import org.scijava.io.IOPlugin;
+import org.scijava.io.location.FileLocation;
+import org.scijava.io.location.Location;
 import org.scijava.plugin.Attr;
 import org.scijava.plugin.Plugin;
 
@@ -35,6 +37,20 @@ public class RadeltaIOPlugin extends AbstractIOPlugin<Object> {
     @Override
     public boolean supportsOpen(String source) {
         return RadeltaImageFactory.isRadeltaPath(source);
+    }
+
+    /**
+     * With Fiji's "SciJava I/O" opening option, the legacy bridge resolves
+     * paths to locations; accept local files there as well.
+     */
+    @Override
+    public boolean supportsOpen(Location source) {
+        return source instanceof FileLocation && supportsOpen(((FileLocation) source).getFile().getPath());
+    }
+
+    @Override
+    public Object open(Location source) throws IOException {
+        return source instanceof FileLocation ? open(((FileLocation) source).getFile().getPath()) : null;
     }
 
     @Override

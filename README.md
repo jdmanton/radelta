@@ -190,8 +190,9 @@ Large datasets can be written in a bounded-memory streaming form. ImageJ opens t
 
 The plugin can open `.rdlt` / `.radelta` files and export datasets using either lossless or calibrated-lossy compression.
 It also opens Radelta-compressed HDF5 files through the existing Fiji HDF5
-importer, using the filter bundled in the same JAR. Choose **Plugins → Radelta
-→ Open HDF5…**; `.rdlt` opening and export commands remain available.
+importer, using the filter bundled in the same JAR. Drag such a file onto Fiji,
+use File > Open, or choose **Plugins → Radelta → Open HDF5…**; `.rdlt` opening
+and export commands remain available.
 **Save as Radelta HDF5 (lossless)…** and **(lossy)…** write HDF5 datasets that
 Fiji, h5py and the `radelta-hdf5` tools can read; see
 [Writing from Fiji](hdf5/FIJI.md#writing-from-fiji).
@@ -219,11 +220,11 @@ exports preserve existing destinations. Virtual-stack decoding errors stop
 processing and export; unreadable planes are never replaced with black pixels.
 Saving over a virtual stack's source file, including an alias, is rejected.
 
-For a complete installation, download `radelta-imagej-0.7.4-fiji.zip`, extract
+For a complete installation, download `radelta-imagej-0.7.5-fiji.zip`, extract
 it, close Fiji and run `python install.py /path/to/Fiji.app`. The installer
 adds missing HDF5 dependencies, reuses existing reader libraries and disables
 older Radelta JARs. See [installation details](imagej-plugin/FIJI_BUNDLE.md).
-If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.4.jar`
+If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.5.jar`
 into Fiji's `plugins` folder, remove older Radelta JARs and restart Fiji.
 The release JAR includes both codecs and HDF5 decoders for all five platforms.
 
@@ -247,7 +248,7 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.7.4.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.7.5.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
 

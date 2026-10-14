@@ -122,6 +122,115 @@ final class Hdf5Bindings {
         callStatus("H5Fclose", types(long.class), file);
     }
 
+    // Reading the structure of existing files.
+
+    boolean isHdf5(String path) throws IOException {
+        return (Boolean) call("H5Fis_hdf5", types(String.class), path);
+    }
+
+    long openFileReadOnly(String path) throws IOException {
+        return callLong("H5Fopen", types(String.class, int.class, long.class),
+                path, intConstant("H5F_ACC_RDONLY"), constant("H5P_DEFAULT"));
+    }
+
+    /** Number of links in a group, which is opened and closed here. */
+    long linkCount(long file, String group) throws IOException {
+        long id = callLong("H5Gopen", types(long.class, String.class, long.class), file, group, constant("H5P_DEFAULT"));
+        try {
+            Object info = call("H5Gget_info", types(long.class), id);
+            return info.getClass().getField("nlinks").getLong(info);
+        } catch (ReflectiveOperationException e) {
+            throw new IOException("Incompatible HDF5 reader: H5G_info_t.nlinks is unavailable", e);
+        } finally {
+            callStatus("H5Gclose", types(long.class), id);
+        }
+    }
+
+    /** The name of the index-th link in a group, in name order. */
+    String linkName(long file, String group, long index) throws IOException {
+        return (String) call("H5Lget_name_by_idx",
+                types(long.class, String.class, int.class, int.class, long.class, long.class),
+                file, group, intConstant("H5_INDEX_NAME"), intConstant("H5_ITER_INC"), index, constant("H5P_DEFAULT"));
+    }
+
+    /** Object type and a file-unique address, following soft links. */
+    long[] objectTypeAndAddress(long file, String path) throws IOException {
+        Object info = call("H5Oget_info_by_name", types(long.class, String.class, int.class, long.class),
+                file, path, intConstant("H5O_INFO_BASIC"), constant("H5P_DEFAULT"));
+        try {
+            return new long[] {info.getClass().getField("type").getInt(info), info.getClass().getField("addr").getLong(info)};
+        } catch (ReflectiveOperationException e) {
+            throw new IOException("Incompatible HDF5 reader: H5O_info_t fields are unavailable", e);
+        }
+    }
+
+    long openDataset(long file, String path) throws IOException {
+        return callLong("H5Dopen", types(long.class, String.class, long.class), file, path, constant("H5P_DEFAULT"));
+    }
+
+    /** Filter identifiers in a dataset's pipeline, in order. */
+    int[] datasetFilters(long dataset) throws IOException {
+        long dcpl = callLong("H5Dget_create_plist", types(long.class), dataset);
+        try {
+            int count = ((Number) call("H5Pget_nfilters", types(long.class), dcpl)).intValue();
+            int[] filters = new int[Math.max(0, count)];
+            for (int i = 0; i < filters.length; ++i) {
+                filters[i] = ((Number) call("H5Pget_filter", types(long.class, int.class, int[].class, long[].class,
+                        int[].class, long.class, String[].class, int[].class),
+                        dcpl, i, new int[1], new long[] {0}, new int[1], 64L, new String[1], new int[1])).intValue();
+            }
+            return filters;
+        } finally {
+            closePropertyList(dcpl);
+        }
+    }
+
+    long[] datasetShape(long dataset) throws IOException {
+        long space = callLong("H5Dget_space", types(long.class), dataset);
+        try {
+            int rank = ((Number) call("H5Sget_simple_extent_ndims", types(long.class), space)).intValue();
+            long[] dims = new long[Math.max(0, rank)];
+            callStatus("H5Sget_simple_extent_dims", types(long.class, long[].class, long[].class), space, dims, null);
+            return dims;
+        } finally {
+            closeSpace(space);
+        }
+    }
+
+    /**
+     * A string attribute, fixed or variable length (h5py writes the latter),
+     * or null when it is absent or not a string.
+     */
+    String readStringAttribute(long file, String object, String name) throws IOException {
+        long lapl = constant("H5P_DEFAULT");
+        if (!(Boolean) call("H5Aexists_by_name", types(long.class, String.class, String.class, long.class),
+                file, object, name, lapl)) return null;
+        long attribute = callLong("H5Aopen_by_name", types(long.class, String.class, String.class, long.class, long.class),
+                file, object, name, lapl, lapl);
+        try {
+            long type = callLong("H5Aget_type", types(long.class), attribute);
+            try {
+                if (((Number) call("H5Tget_class", types(long.class), type)).intValue() != intConstant("H5T_STRING")) return null;
+                if ((Boolean) call("H5Tis_variable_str", types(long.class), type)) {
+                    String[] value = new String[1];
+                    callStatus("H5AreadVL", types(long.class, long.class, String[].class), attribute, type, value);
+                    return value[0];
+                }
+                long size = ((Number) call("H5Tget_size", types(long.class), type)).longValue();
+                if (size <= 0 || size > 4096) return null;
+                byte[] bytes = new byte[(int) size];
+                callStatus("H5Aread", types(long.class, long.class, byte[].class), attribute, type, bytes);
+                int end = 0;
+                while (end < bytes.length && bytes[end] != 0) ++end;
+                return new String(bytes, 0, end, StandardCharsets.UTF_8);
+            } finally {
+                callStatus("H5Tclose", types(long.class), type);
+            }
+        } finally {
+            callStatus("H5Aclose", types(long.class), attribute);
+        }
+    }
+
     long createPropertyList(String className) throws IOException {
         return callLong("H5Pcreate", types(long.class), constant(className));
     }

@@ -23,7 +23,9 @@ disables older Radelta JARs by retaining them with a `.jar.disabled` suffix.
 It does not overwrite Fiji's ImageJ core. If an old or duplicate HDF5 reader
 is detected, update it using Fiji's updater before retrying.
 
-Restart Fiji and choose **Plugins → Radelta → Open HDF5…**, or the existing
+Restart Fiji and drag a Radelta HDF5 file onto it, or use **File → Open…**;
+see [opening in Fiji](../hdf5/FIJI.md). To browse every dataset in a file,
+choose **Plugins → Radelta → Open HDF5…**, or the existing
 **File → Import → HDF5…** command. Select your dataset and axis layout:
 In the importer, choose **individual hyperstacks (custom layout)** to enter
 the layout explicitly.

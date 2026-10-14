@@ -90,6 +90,16 @@ public final class RadeltaHdf5 {
     }
 
     /**
+     * Open a file's Radelta-compressed dataset as File &gt; Open and
+     * drag-and-drop do: directly when the file has one such dataset with an
+     * {@code axes} attribute, otherwise after asking for the dataset and
+     * layout. Returns null if that dialog is cancelled.
+     */
+    public static ImagePlus openFile(String filename) throws IOException {
+        return RadeltaHdf5Opener.open(filename);
+    }
+
+    /**
      * Save a grayscale image as a lossless Radelta HDF5 dataset, replacing
      * {@code filename}. Hyperstacks use canonical TCZYX/CZYX/ZYX/YX axes; see
      * {@link #save(ImagePlus, String, String, boolean, double, double, double, int, int, int)}.

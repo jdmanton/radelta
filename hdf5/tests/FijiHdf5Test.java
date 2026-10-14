@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.util.Arrays;
 import ch.systemsx.cisd.hdf5.HDF5Factory;
 import ch.systemsx.cisd.hdf5.IHDF5Reader;
+import ch.systemsx.cisd.hdf5.IHDF5Writer;
 import hdf.hdf5lib.H5;
 import hdf.hdf5lib.HDF5Constants;
 import ij.ImagePlus;
@@ -95,9 +96,138 @@ public final class FijiHdf5Test {
                             check(roi[i++] == reference[(((1*2+1)*5+z)*13+y)*17+x], path + ": hyperslab differs");
             }
         }
-        if (bundled && args.length > 3 && args[2].equals("--write-dir")) writerTests(new File(args[3]));
+        if (bundled && args.length > 3 && args[2].equals("--write-dir")) {
+            writerTests(new File(args[3]));
+            openerTests(new File(args[0]), new File(args[3]), context);
+        }
         if (context != null) context.getClass().getMethod("dispose").invoke(context);
         System.out.println("Fiji HDF5: unsigned pixels, lossless/lossy, endian, edge chunks, axes, calibration and hyperslabs passed");
+    }
+
+    // File > Open and drag-and-drop through the bundled SciJava I/O hook.
+
+    private static Object opener(String method, Class<?>[] types, Object... values) throws Exception {
+        Method m = Class.forName("org.radelta.imagej.RadeltaHdf5Opener").getDeclaredMethod(method, types);
+        m.setAccessible(true);
+        try {
+            return m.invoke(null, values);
+        } catch (InvocationTargetException e) {
+            if (e.getCause() instanceof Exception) throw (Exception) e.getCause();
+            throw e;
+        }
+    }
+
+    private static boolean supports(File file) throws Exception {
+        return (Boolean) opener("supports", new Class<?>[] {String.class}, file.getPath());
+    }
+
+    /** Dataset paths and layouts the opener finds, e.g. "/a:zyx". */
+    private static String catalogue(File file) throws Exception {
+        StringBuilder out = new StringBuilder();
+        for (Object dataset : (java.util.List<?>) opener("radeltaDatasets", new Class<?>[] {String.class}, file.getPath())) {
+            java.lang.reflect.Field field = dataset.getClass().getDeclaredField("path");
+            field.setAccessible(true);
+            String path = (String) field.get(dataset);
+            Method layout = dataset.getClass().getDeclaredMethod("layout");
+            layout.setAccessible(true);
+            out.append(out.length() == 0 ? "" : " ").append(path).append(':').append(layout.invoke(dataset));
+        }
+        return out.toString();
+    }
+
+    private static void checkOpensDirectly(File file, Case k) throws Exception {
+        // Headless: a dialog would throw, so success shows the file opened directly.
+        ImagePlus image = (ImagePlus) plugin("openFile", new Class<?>[] {String.class}, file.getPath());
+        check(image != null && image.getNChannels() == k.nc && image.getNSlices() == k.nz && image.getNFrames() == k.nt,
+            file.getName() + ": opened with the wrong shape");
+        int[] want = expected(k);
+        int plane = k.nx * k.ny;
+        for (int t = 0; t < k.nt; ++t)
+            for (int c = 0; c < k.nc; ++c)
+                for (int z = 0; z < k.nz; ++z) {
+                    short[] p = (short[]) image.getStack().getPixels(image.getStackIndex(c + 1, z + 1, t + 1));
+                    for (int i = 0; i < plane; ++i)
+                        check((p[i] & 65535) == want[((t * k.nc + c) * k.nz + z) * plane + i], file.getName() + ": pixels differ");
+                }
+        image.close();
+    }
+
+    private static void openerTests(File fixture, File dir, Object context) throws Exception {
+        // The fixture holds six Radelta datasets without axes attributes, plus
+        // uncompressed references that must not be offered.
+        check(supports(fixture), "Fixture with Radelta datasets was not claimed");
+        check(catalogue(fixture).equals("/lossless2d_le:yx /lossless3d_be:zyx /lossless4d_le:czyx " +
+            "/lossless5d_be:tczyx /lossy3d_be:zyx /lossy5d_le:tczyx"), "Fixture catalogue: " + catalogue(fixture));
+
+        // Files written by the plugin record their layout and open without a dialog.
+        Case edges = new Case("written_3d_edges", 17, 13, 5, 1, 1, 16, false, 2, 7, 9, "um", 0.5, "/images");
+        Case lossy = new Case("written_5d_lossy", 17, 13, 5, 2, 2, 16, true, 3, 7, 9, "um", 0.5, "/images");
+        Case nested = new Case("written_4d_8bit_nm", 11, 9, 3, 2, 1, 8, false, 2, 5, 4, "nm", 120.0, "/groups/inside/images");
+        for (Case k : new Case[] {edges, lossy, nested}) {
+            File file = new File(dir, k.name + ".h5");
+            check(supports(file), file.getName() + ": not claimed");
+            check(catalogue(file).equals(k.dataset + ":" + k.layout()), file.getName() + ": catalogue " + catalogue(file));
+            checkOpensDirectly(file, k);
+        }
+
+        // h5py and the radelta-hdf5 tools write axes as a variable-length string.
+        File variable = new File(dir, "variable_axes.h5");
+        Files.copy(new File(dir, "written_5d_lossy.h5").toPath(), variable.toPath());
+        try (IHDF5Writer writer = HDF5Factory.open(variable)) {
+            writer.object().deleteAttribute("/images", "axes");
+            writer.string().setAttrVL("/images", "axes", "TCZYX");
+        }
+        check(catalogue(variable).equals("/images:tczyx"), "Variable-length axes: " + catalogue(variable));
+        checkOpensDirectly(variable, lossy);
+
+        // Other files are left to their own readers.
+        File plain = new File(dir, "plain.h5");
+        try (IHDF5Writer writer = HDF5Factory.open(plain)) {
+            writer.uint16().writeArray("/images", new short[] {1, 2, 3, 4});
+        }
+        File notHdf5 = new File(dir, "not_hdf5.h5");
+        Files.write(notHdf5.toPath(), "not an HDF5 file".getBytes("UTF-8"));
+        File otherExtension = new File(dir, "radelta.dat");
+        Files.copy(new File(dir, "written_2d.h5").toPath(), otherExtension.toPath());
+        for (File file : new File[] {plain, notHdf5, otherExtension, new File(dir, "missing.h5")})
+            check(!supports(file), file.getName() + ": claimed by the Radelta HDF5 hook");
+
+        // Both routes Fiji uses for File > Open and drag-and-drop must reach the
+        // hooks: the legacy bridge's eager lookup (the default) and, with the
+        // "SciJava I/O" option, IOService.getOpener on a resolved location.
+        Method service = context.getClass().getMethod("getService", Class.class);
+        Object io = service.invoke(context, Class.forName("org.scijava.io.IOService"));
+        Object plugins = service.invoke(context, Class.forName("org.scijava.plugin.PluginService"));
+        String radelta = new File(dir, "written_2d.h5").getPath(), rdlt = new File(dir, "image.rdlt").getPath();
+        String[][] routes = {
+            {radelta, "org.radelta.imagej.RadeltaHdf5IOPlugin"},
+            {rdlt, "org.radelta.imagej.RadeltaIOPlugin"},
+            {plain.getPath(), null},
+        };
+        Method getOpener = io.getClass().getMethod("getOpener", String.class);
+        for (String[] route : routes) {
+            Object eager = null;
+            for (Object info : (java.util.List<?>) io.getClass().getMethod("getPlugins").invoke(io)) {
+                if (!(Boolean) info.getClass().getMethod("is", String.class).invoke(info, "eager")) continue;
+                Object instance = plugins.getClass().getMethod("createInstance", Class.forName("org.scijava.plugin.PluginInfo"))
+                    .invoke(plugins, info);
+                if ((Boolean) instance.getClass().getMethod("supportsOpen", String.class).invoke(instance, route[0])) {
+                    eager = instance;
+                    break;
+                }
+            }
+            Object resolved = getOpener.invoke(io, route[0]);
+            for (Object chosen : new Object[] {eager, resolved}) {
+                String name = chosen == null ? null : chosen.getClass().getName();
+                if (route[1] == null) {
+                    check(name == null || !name.startsWith("org.radelta."), "A Radelta hook claimed " + route[0]);
+                } else {
+                    check(route[1].equals(name), (chosen == eager ? "Eager lookup" : "getOpener") + " chose " + name +
+                        " for " + new File(route[0]).getName());
+                }
+            }
+        }
+        System.out.println("Fiji HDF5 opening: detection, catalogue, recorded layouts, variable-length axes and SciJava hook passed");
     }
 
     // Writing through the bundled plugin.

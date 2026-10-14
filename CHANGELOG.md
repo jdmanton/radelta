@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.5
+
+- dragging a Radelta HDF5 file onto Fiji, or opening it with File > Open, now
+  opens it: one dataset with an `axes` attribute opens directly, otherwise a
+  dialog chooses the dataset and layout. Other HDF5 files still reach their
+  own readers instead of falling through to Bio-Formats;
+- the `.rdlt` and HDF5 hooks also work when Fiji's "SciJava I/O" opening
+  option is enabled, which resolves paths to locations first;
+
 ## 0.7.4
 
 - **Save as Radelta HDF5 (lossless/lossy)** in the ImageJ plugin, plus scriptable
