@@ -114,7 +114,7 @@ jobs:
           --hdf5-source _deps/hdf5-source
           --hdf5-version 1.14.6
           --smoke-test
-      - name: Package standalone Fiji decoder
+      - name: Package standalone HDF5 filter
         run: >-
           python scripts/package_hdf5_fiji.py
           --platform ${{ matrix.platform }}
@@ -128,7 +128,7 @@ jobs:
             --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} \
             --prefix _deps/hdf5-install \
             --build-imagej \
-            --archive "dist/radelta-hdf5-fiji-${version}-${{ matrix.platform }}-${{ matrix.arch }}.zip"
+            --archive "dist/radelta-hdf5-filter-${version}-${{ matrix.platform }}-${{ matrix.arch }}.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: hdf5-${{ matrix.platform }}-${{ matrix.arch }}

@@ -75,7 +75,7 @@ class NativeStagingTests(unittest.TestCase):
             native, hdf5, resources = work / "native", work / "hdf5", work / "resources"
             for platform, arch, library, decoder in stager.TARGETS:
                 name = f"radelta-0.7.0-{platform}-{arch}"
-                reader = f"radelta-hdf5-fiji-0.7.0-{platform}-{arch}"
+                reader = f"radelta-hdf5-filter-0.7.0-{platform}-{arch}"
                 jar(native / (name + ".zip"), {f"{name}/{library}": b"core",
                     f"{name}/python/radelta_zarr/_lib/{library}": b"wrong nested copy"})
                 jar(hdf5 / (reader + ".zip"), {f"{reader}/plugins/{decoder}": b"decoder",
@@ -90,7 +90,7 @@ class NativeStagingTests(unittest.TestCase):
             work = Path(temp)
             for platform, arch, library, decoder in stager.TARGETS[:-1]:
                 name = f"radelta-0.7.0-{platform}-{arch}"
-                reader = f"radelta-hdf5-fiji-0.7.0-{platform}-{arch}"
+                reader = f"radelta-hdf5-filter-0.7.0-{platform}-{arch}"
                 jar(work / "native" / (name + ".zip"), {f"{name}/{library}": b"core"})
                 jar(work / "hdf5" / (reader + ".zip"), {f"{reader}/plugins/{decoder}": b"decoder",
                     f"{reader}/HDF5_LICENSE.txt": b"licence"})

@@ -16,7 +16,7 @@ called by the existing tag-release workflow. Manual runs require the workflow
 to be present on the repository's default branch. Download the matching
 `hdf5-<platform>-<architecture>` artifact from a completed Actions run; inside
 it contains `radelta-hdf5-<version>-<platform>-<architecture>.zip` and the
-standalone `radelta-hdf5-fiji-<version>-<platform>-<architecture>.zip`. Tagged
+standalone `radelta-hdf5-filter-<version>-<platform>-<architecture>.zip`. Tagged
 releases attach both sets alongside the existing native and ImageJ packages.
 No release is published by a manual HDF5 build alone.
 

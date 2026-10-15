@@ -89,10 +89,13 @@ automatically from the Java architecture.
 
 ## Standalone embedded filter for other HDF5 applications
 
-The separate `radelta-hdf5-fiji-<version>-<platform>-<arch>.zip` remains
-available for native readers that need an explicit plugin directory. It
-contains only the embedded filter and documentation, with no additional HDF5
-runtime. Set `HDF5_PLUGIN_PATH` to its extracted `plugins` directory before
+The separate `radelta-hdf5-filter-<version>-<platform>-<arch>.zip` is for
+applications that already have an HDF5 runtime and need an explicit plugin
+directory. Fiji users normally need only the ImageJ JAR or complete Fiji
+bundle described above: the JAR already contains this filter and registers it
+automatically. The standalone ZIP contains only the embedded filter and
+documentation, with no additional HDF5 runtime. Set `HDF5_PLUGIN_PATH` to its
+extracted `plugins` directory before
 starting the reader. It decodes every Radelta dataset. It encodes only datasets
 created with all 17 filter parameters (see [filter parameters](README.md#filter-parameters-and-id));
 with the usual 0 or 11, writes fail, so use the full SDK filter for general
@@ -123,7 +126,7 @@ To test a built JAR against installed HDF5 fixture tools:
 ```sh
 python scripts/test_hdf5_fiji.py --platform linux --arch x86_64 \
   --prefix _deps/hdf5-install \
-  --archive dist/radelta-hdf5-fiji-0.7.6-linux-x86_64.zip \
+  --archive dist/radelta-hdf5-filter-0.7.6-linux-x86_64.zip \
   --imagej-jar imagej-plugin/target/radelta-imagej-0.7.6.jar
 ```
 

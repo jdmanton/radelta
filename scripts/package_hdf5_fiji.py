@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the standalone embedded HDF5 filter for Fiji's existing reader."""
+"""Package the standalone native filter for applications with an HDF5 runtime."""
 import argparse
 import hashlib
 import json
@@ -21,14 +21,14 @@ def main():
     parser.add_argument("--dist-dir", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    name = f"radelta-hdf5-fiji-{version}-{args.platform}-{args.arch}"
+    name = f"radelta-hdf5-filter-{version}-{args.platform}-{args.arch}"
     plugin = args.prefix / "lib" / "hdf5" / "fiji-plugins" / PLUGIN_NAMES[args.platform]
     for path in (plugin, args.hdf5_source / "COPYING"):
         if not path.is_file():
             parser.error(f"Required file missing: {path}")
     dist = args.dist_dir.resolve()
     dist.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="hdf5-fiji-package-", dir=dist) as temporary:
+    with tempfile.TemporaryDirectory(prefix="hdf5-filter-package-", dir=dist) as temporary:
         stage = Path(temporary) / name
         (stage / "plugins").mkdir(parents=True)
         shutil.copy2(plugin, stage / "plugins" / plugin.name)

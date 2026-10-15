@@ -83,7 +83,7 @@ Each version has one GitHub release with separate installation assets:
 | `radelta-<version>-<platform>-<arch>.zip` | CLI, C library/header, documentation and optional Zarr source package |
 | `radelta_zarr-<version>-py3-none-<platform>.whl` | Python Zarr codec/converter with the matching native library |
 | `radelta-hdf5-<version>-<platform>-<arch>.zip` | HDF5 filter, compatible runtime/tools and Python helpers |
-| `radelta-hdf5-fiji-<version>-<platform>-<arch>.zip` | Standalone embedded filter for HDF5 runtimes such as Fiji's |
+| `radelta-hdf5-filter-<version>-<platform>-<arch>.zip` | Standalone native filter for applications with an existing HDF5 runtime; already included in the ImageJ JAR |
 | `radelta-imagej-<version>.jar` | ImageJ plugin with native codecs and HDF5 decoders for all five platforms |
 | `radelta-imagej-<version>-fiji.zip` | Complete Fiji installation: Radelta JAR, HDF5 importer/dependencies and installer |
 

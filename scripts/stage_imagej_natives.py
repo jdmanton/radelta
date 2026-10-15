@@ -28,14 +28,14 @@ def stage(native_packages, hdf5_packages, resources, version):
     pending = []
     for platform, arch, native, decoder in TARGETS:
         name = f"radelta-{version}-{platform}-{arch}"
-        fiji_name = f"radelta-hdf5-fiji-{version}-{platform}-{arch}"
+        filter_name = f"radelta-hdf5-filter-{version}-{platform}-{arch}"
         pending.append((resources / "natives" / f"{platform}-{arch}" / native,
                         read_member(native_packages / (name + ".zip"), f"{name}/{native}")))
         pending.append((resources / "hdf5" / f"{platform}-{arch}" / decoder,
-                        read_member(hdf5_packages / (fiji_name + ".zip"), f"{fiji_name}/plugins/{decoder}")))
+                        read_member(hdf5_packages / (filter_name + ".zip"), f"{filter_name}/plugins/{decoder}")))
         if platform == "linux" and arch == "x86_64":
             pending.append((resources / "META-INF" / "licenses" / "HDF5.txt",
-                            read_member(hdf5_packages / (fiji_name + ".zip"), f"{fiji_name}/HDF5_LICENSE.txt")))
+                            read_member(hdf5_packages / (filter_name + ".zip"), f"{filter_name}/HDF5_LICENSE.txt")))
     for destination, data in pending:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
