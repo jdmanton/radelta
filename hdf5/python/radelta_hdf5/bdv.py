@@ -14,6 +14,7 @@ import numpy as np
 import tifffile
 
 from . import FILTER_ID, create_dataset, filter_options
+from ._io import canonical_tiff, chunk_slices
 
 
 def _axes(axes, shape):
@@ -49,8 +50,6 @@ class _Hdf5Source:
 
 class _TiffSource:
     def __init__(self, tif, axes, cache_mib):
-        # Reuse the CLI's validation of uint16, plane-per-page TIFF series.
-        from .__main__ import canonical_tiff
         if len(tif.series) != 1:
             raise ValueError("Select a single TIFF series before converting")
         self.series = tif.series[0]
@@ -217,7 +216,6 @@ def export_bdv(input_path, output_xml, *, dataset="/images", axes=None,
     overwrites keep the previous HDF5 generation for existing readers. Move XML
     and its referenced HDF5 file together. No other input datasets are copied.
     """
-    from .__main__ import chunk_slices
     input_path, output_xml = Path(input_path), Path(output_xml)
     if output_xml.suffix.lower() != ".xml":
         raise ValueError("BDV output must have an .xml extension")

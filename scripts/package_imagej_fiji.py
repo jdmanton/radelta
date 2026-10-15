@@ -6,11 +6,10 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
-import urllib.request
 from zipfile import ZipFile
 
 from stage_imagej_natives import TARGETS
-from test_hdf5_fiji import fiji_jars
+from java_dependencies import download, fiji_jars
 
 ROOT = Path(__file__).resolve().parents[1]
 VIBEZ_SOURCE = ("https://github.com/fiji/HDF5_Vibez/archive/a31895e580b5ff0b6979118fea192cb60b9adb86.tar.gz",
@@ -21,20 +20,6 @@ JHDF5_LICENCES = (
     ("COPYING", "2b580dc8770167214ba41bad8efc81659684b533e25af40a7417898781e8d97e"),
     ("COPYING-hdf5", "e356b540f7986f2db149a216f49bd82c4f70449c19b7ec903aace3d84e1eba7f"),
 )
-
-
-def download(cache, filename, url, sha256):
-    cache.mkdir(parents=True, exist_ok=True)
-    path = cache / filename
-    if not path.is_file():
-        with urllib.request.urlopen(url, timeout=120) as response:
-            data = response.read()
-        if hashlib.sha256(data).hexdigest() != sha256:
-            raise RuntimeError(f"SHA256 mismatch for {filename}")
-        path.write_bytes(data)
-    if hashlib.sha256(path.read_bytes()).hexdigest() != sha256:
-        raise RuntimeError(f"SHA256 mismatch for cached {filename}")
-    return path
 
 
 def validate_plugin(jar, targets):

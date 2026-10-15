@@ -104,22 +104,11 @@ directory per reader.
 
 ## Integration tests
 
-The build workflow tests the extracted standalone filter through HDF5
-1.14.6 on all five platforms: it reads datasets written by the SDK filter, the
-SDK filter reads datasets it writes with explicit parameters, and it rejects
-writes without them. On the four platforms supported by JHDF5 it also starts
-the ImageJ plugin's SciJava HDF5 service from its built JAR with
-`HDF5_PLUGIN_PATH` unset. It checks exact unsigned pixels, lossless/lossy
-reference images, both byte orders, ranks 2–5, padded edge chunks,
-multi-channel/time chunks, hyperstack axis ordering, physical calibration
-and chunk-crossing hyperslabs. It checks which files the File → Open and
-drag-and-drop hook claims, through both of Fiji's opening routes, and that
-recorded layouts (including h5py's variable-length `axes`) open without a
-dialog. The plugin then saves lossless and lossy
-8/16-bit images of ranks 2–5 with edge chunks, nested groups and replacement;
-each is checked through JHDF5 (pixels, chunks, all filter parameters and
-attributes) and Fiji's importer, and the SDK filter re-reads it in a separate
-native process. Linux ARM64's Java test is explicitly skipped.
+CI checks interoperability between the SDK and embedded filters on all five
+platforms. On the four platforms supported by JHDF5, it also tests automatic
+filter registration, Fiji opening and saving, exact unsigned pixels,
+lossless/lossy results, axes, calibration and partial reads. The Java test is
+skipped on Linux ARM64 because the supplied JHDF5 JAR lacks that native runtime.
 
 To test a built JAR against installed HDF5 fixture tools:
 

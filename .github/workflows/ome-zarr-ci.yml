@@ -53,7 +53,7 @@ jobs:
       - name: Package matching Python codec and native library
         run: python scripts/package_native.py --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
       - name: Install wheel build tools
-        run: python -m pip install build wheel packaging "setuptools>=68"
+        run: python -m pip install build packaging "setuptools>=70.1"
       - name: Install Linux wheel repair tools
         if: matrix.platform == 'linux'
         run: python -m pip install auditwheel patchelf

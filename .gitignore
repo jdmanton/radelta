@@ -9,9 +9,12 @@
 .vscode/
 /.tools/
 /dist/
+/_deps/
 
 /hdf5/build*/
 /hdf5/python/*.egg-info/
+/hdf5/python/build/
+/hdf5/python/dist/
 __pycache__/
 
 /zarr/python/*.egg-info/

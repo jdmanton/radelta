@@ -280,7 +280,8 @@ extents (indices 11–15, omitted axes become one) and byte order (16: 0 little,
 1 big). These local parameters are derived from the dataset, not supplied chunk
 geometry. The embedded build used by Fiji has no `set_local` callback, since it
 makes no HDF5 calls: it encodes only datasets created with all 17 words,
-as the ImageJ plugin does, and fails writes otherwise. Schema version 1 accepts only the existing Radelta 0.5.1 formats.
+as the ImageJ plugin does, and fails writes otherwise. Each chunk uses the
+current checksummed Radelta lossless or calibrated-lossy stream format.
 
 ## Tests
 

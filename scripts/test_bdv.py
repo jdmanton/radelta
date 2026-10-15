@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "hdf5/tests"))
 
 from radelta_hdf5 import configure_plugin, export_bdv
 from test_bdv import reference_mean
-from test_hdf5_fiji import FIJI_SITE, pinned_jars
+from java_dependencies import FIJI_SITE, pinned_jars
 
 
 def main():

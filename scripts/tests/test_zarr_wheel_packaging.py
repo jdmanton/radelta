@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from setuptools import Distribution
-from wheel.bdist_wheel import bdist_wheel
+from setuptools.command.bdist_wheel import bdist_wheel
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("package_zarr_wheel", ROOT/"scripts/package_zarr_wheel.py")

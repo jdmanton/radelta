@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 import platform as host_platform
 from setuptools import Distribution, setup
-from wheel.bdist_wheel import bdist_wheel
+from setuptools.command.bdist_wheel import bdist_wheel
 
 BINARY = any(p.suffix in {".dll", ".so", ".dylib"}
              for p in (Path(__file__).parent / "radelta_zarr" / "natives").glob("*"))

@@ -12,8 +12,7 @@ The **HDF5 builds** GitHub Actions workflow builds these five platforms:
 
 It runs for changes to HDF5/native build inputs on branches and pull requests,
 can be run manually with **Actions → HDF5 builds → Run workflow**, and is
-called by the existing tag-release workflow. Manual runs require the workflow
-to be present on the repository's default branch. Download the matching
+called by the tag-release workflow. Download the matching
 `hdf5-<platform>-<architecture>` artifact from a completed Actions run; inside
 it contains `radelta-hdf5-<version>-<platform>-<architecture>.zip` and the
 standalone `radelta-hdf5-filter-<version>-<platform>-<architecture>.zip`. Tagged
@@ -28,7 +27,7 @@ smoke test runs `h5dump -V` and the native plugin-loading/5D round-trip/hypersla
 test before uploading each ZIP. The existing Linux HDF5 CI job separately runs
 the full Python file-conversion and filter integration suite.
 
-The Fiji ZIP contains only the embedded Radelta filter and documentation.
+The standalone filter ZIP contains only the embedded Radelta filter and documentation.
 It is useful for configuring other native readers directly. For Fiji, prefer
 the complete `radelta-imagej-<version>-fiji.zip`: the Radelta JAR includes the
 filter and registers it automatically, and the installation bundle includes
@@ -78,14 +77,3 @@ in one process; ordinary PyPI h5py wheels may bundle their own copy.
 The default filter ID remains the private ID 65024. Other readers need a
 matching plugin and HDF5 library. Applications can use the included headers and
 CMake SDK files to build against the bundled HDF5 library.
-
-## Repository setup and release
-
-Commit the workflow, build/package helpers, CMake changes and HDF5 implementation,
-then push the branch. To get downloadable binaries immediately after merging,
-run **HDF5 builds** manually; a new version tag is not required.
-
-For a tagged release, keep `VERSION`, native Cargo metadata, ImageJ metadata,
-the HDF5 CMake version and Python package version synchronised before creating
-`v<version>`. The existing `release.yml` waits for HDF5 builds and publishes
-all HDF5 SDK and Fiji decoder ZIPs with the native/ImageJ assets and release checksums.
