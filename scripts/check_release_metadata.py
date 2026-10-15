@@ -9,6 +9,17 @@ ROOT = Path(__file__).resolve().parents[1]
 version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 errors = []
 
+array_python = (ROOT / "python" / "pyproject.toml").read_text(encoding="utf-8")
+array_runtime = (ROOT / "python" / "radelta" / "__init__.py").read_text(encoding="utf-8")
+for label, content, variable in (("Python array package", array_python, "version"),
+                                  ("Python array runtime", array_runtime, "__version__")):
+    match = re.search(rf'(?m)^{variable}\s*=\s*"([^"]+)"', content)
+    if not match or match.group(1) != version:
+        errors.append(f"{label} version does not match {version}")
+for extra, pinned in re.findall(r'radelta-(hdf5|zarr)==([^";]+)', array_python):
+    if pinned != version:
+        errors.append(f"Python {extra} extra pins {pinned}, expected {version}")
+
 cargo = (ROOT / "native" / "Cargo.toml").read_text(encoding="utf-8")
 m = re.search(r"(?ms)^\[package\].*?^version\s*=\s*\"([^\"]+)\"", cargo)
 if not m or m.group(1) != version:

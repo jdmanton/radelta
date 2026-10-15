@@ -1,6 +1,6 @@
 # Radelta compression for HDF5
 
-This plugin stores ordinary chunked HDF5 datasets using Radelta 0.7.6.
+This plugin stores ordinary chunked HDF5 datasets using Radelta 0.7.7.
 Each chunk contains an RDL1/RDM2 lossless or RDLQ/RDQ2 calibrated-lossy stream.
 HDF5 handles indexing, metadata and partial reads; the filter only encodes pixels.
 The Rust codec is linked into the plugin, so readers do not need a separate
@@ -26,6 +26,22 @@ See [download and use prebuilt packages](ONLINE_BUILDS.md). Tagged releases
 attach the packages automatically; manual Actions runs do not require a new tag.
 
 ## Build and install
+
+For Python use, prefer the self-contained `radelta_hdf5` wheel from the release
+or CI artifacts. Install the wheel matching your platform and import
+`radelta_hdf5`; its filter registers automatically with h5py's own HDF5 runtime.
+No separate SDK, `HDF5_PLUGIN_PATH`, or source build of h5py is needed.
+The wheel supports Python 3.9+, Windows x86-64, macOS 11+ on Intel/Apple Silicon,
+and Linux x86-64/ARM64 with glibc 2.34+. For example, on Windows:
+
+```powershell
+python -m pip install .\radelta_hdf5-0.7.7-py3-none-win_amd64.whl
+```
+
+The CLI and Python examples below work without `--plugin-path` or
+`configure_plugin` when the bundled wheel is installed. Explicit directories
+remain available for custom SDK builds. The following build instructions are
+for the SDK filter and native HDF5 applications.
 
 Requires Rust 1.98.0, CMake 3.18+, a C compiler and HDF5 development files
 (HDF5 1.8.15 or later). For example, on Ubuntu:
@@ -79,9 +95,8 @@ match `libhdf5-dev`; use the distribution Python interpreter and set
 ```python
 import h5py
 import numpy as np
-from radelta_hdf5 import configure_plugin, create_dataset
+from radelta_hdf5 import create_dataset
 
-configure_plugin("hdf5/build/plugins")  # alternatively use HDF5_PLUGIN_PATH
 with h5py.File("image.h5", "w") as f:
     d = create_dataset(f, "images", shape=(100, 2048, 2048),
                        chunks=(4, 512, 512))
@@ -280,7 +295,10 @@ extents (indices 11–15, omitted axes become one) and byte order (16: 0 little,
 1 big). These local parameters are derived from the dataset, not supplied chunk
 geometry. The embedded build used by Fiji has no `set_local` callback, since it
 makes no HDF5 calls: it encodes only datasets created with all 17 words,
-as the ImageJ plugin does, and fails writes otherwise. Each chunk uses the
+as the ImageJ plugin and Python `create_dataset` helper do, and fails writes
+otherwise. Python wheels use this embedded build; use the helper to create
+mandatory-filter datasets rather than passing incomplete parameters to h5py
+directly. Each chunk uses the
 current checksummed Radelta lossless or calibrated-lossy stream format.
 
 ## Tests

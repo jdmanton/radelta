@@ -1,6 +1,6 @@
 [package]
 name = "radelta"
-version = "0.7.6"
+version = "0.7.7"
 edition = "2021"
 description = "High-throughput lossless and calibrated-lossy uint16 multidimensional image codec"
 license = "BSD-3-Clause"

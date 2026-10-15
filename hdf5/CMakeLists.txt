@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(radelta_hdf5 VERSION 0.7.6 LANGUAGES C)
+project(radelta_hdf5 VERSION 0.7.7 LANGUAGES C)
 include(CTest)
 find_package(HDF5 1.8.15 REQUIRED COMPONENTS C)
 if(TARGET HDF5::HDF5)
@@ -76,6 +76,11 @@ if(WIN32)
     target_link_libraries(H5Zradelta_fiji PRIVATE ws2_32 userenv bcrypt ntdll)
 else()
     target_link_libraries(H5Zradelta_fiji PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Only the HDF5 plugin entry points are public. Hide archive symbols so
+        # the linker can discard unused Rust runtime sections and dependencies.
+        target_link_options(H5Zradelta_fiji PRIVATE -Wl,--exclude-libs,ALL -Wl,--gc-sections)
+    endif()
 endif()
 if(MSVC)
     target_compile_options(H5Zradelta_fiji PRIVATE /W4)

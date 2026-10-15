@@ -143,6 +143,18 @@ jobs:
       - name: Test installed wheel outside the checkout
         run: python scripts/test_zarr_wheel.py
 
+      - name: Build and test public Python array wheel
+        run: |
+          python scripts/package_python_wheel.py --kind array --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --library-dir native/target/release
+          python scripts/test_python_wheel.py --kind array --wheel-dir dist/array-wheels
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: array-wheel-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/array-wheels/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.platform }}-${{ matrix.arch }}
@@ -244,6 +256,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: zarr-wheel-*
+          path: release-assets
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: array-wheel-*
           path: release-assets
           merge-multiple: true
 

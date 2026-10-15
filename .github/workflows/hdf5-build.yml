@@ -9,9 +9,13 @@ on:
       - 'hdf5/**'
       - 'imagej-plugin/**'
       - 'native/**'
+      - 'python/**'
       - 'scripts/build_hdf5_dependency.py'
       - 'scripts/package_hdf5.py'
       - 'scripts/package_hdf5_filter.py'
+      - 'scripts/package_python_wheel.py'
+      - 'scripts/package_zarr_wheel.py'
+      - 'scripts/test_python_wheel.py'
       - 'scripts/test_hdf5_fiji.py'
       - 'scripts/java_dependencies.py'
       - 'scripts/check_release_metadata.py'
@@ -25,9 +29,13 @@ on:
       - 'hdf5/**'
       - 'imagej-plugin/**'
       - 'native/**'
+      - 'python/**'
       - 'scripts/build_hdf5_dependency.py'
       - 'scripts/package_hdf5.py'
       - 'scripts/package_hdf5_filter.py'
+      - 'scripts/package_python_wheel.py'
+      - 'scripts/package_zarr_wheel.py'
+      - 'scripts/test_python_wheel.py'
       - 'scripts/test_hdf5_fiji.py'
       - 'scripts/java_dependencies.py'
       - 'scripts/check_release_metadata.py'
@@ -69,6 +77,8 @@ jobs:
             platform: macos
             arch: aarch64
     runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     defaults:
       run:
         shell: bash
@@ -123,6 +133,43 @@ jobs:
           --arch ${{ matrix.arch }}
           --prefix _deps/hdf5-install
           --hdf5-source _deps/hdf5-source
+      - name: Install Python wheel tools
+        run: python -m pip install build packaging "setuptools>=70.1"
+      - name: Install Linux wheel repair tools
+        if: matrix.platform == 'linux'
+        run: python -m pip install auditwheel patchelf
+      - name: Install Windows wheel repair tools
+        if: matrix.platform == 'windows'
+        run: python -m pip install delvewheel
+      - name: Install macOS wheel repair tools
+        if: matrix.platform == 'macos'
+        run: python -m pip install delocate
+      - name: Build self-contained HDF5 wheel
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: >-
+          python scripts/package_python_wheel.py --kind hdf5
+          --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+          --library-dir _deps/hdf5-install/lib/hdf5/fiji-plugins
+          --manylinux-policy manylinux_2_34
+      - name: Test installed HDF5 wheel with current h5py
+        run: |
+          python scripts/package_python_wheel.py --kind array --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --library-dir hdf5/build/cargo/release --dist-dir dist/hdf5-integration-array-wheels --manylinux-policy manylinux_2_34
+          python scripts/test_python_wheel.py --kind combined --wheel-dir dist/hdf5-wheels --array-wheel-dir dist/hdf5-integration-array-wheels
+      - name: Select Python for h5py 3.10 compatibility
+        # h5py 3.10 has Python 3.11 wheels on all five platforms, but no
+        # Python 3.12 wheel for Linux ARM64. Keep this a binary-install test.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test installed HDF5 wheel with h5py 3.10
+        run: python scripts/test_python_wheel.py --kind hdf5 --wheel-dir dist/hdf5-wheels --h5py-version 3.10.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hdf5-wheel-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/hdf5-wheels/*.whl
+          if-no-files-found: error
+          retention-days: 14
       - name: Test relocated decoder and existing Fiji importer
         run: |
           version=$(cat VERSION)

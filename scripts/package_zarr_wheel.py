@@ -34,9 +34,10 @@ def macos_build_environment(library, arch):
     return environment
 
 
-def validate_wheel(path, platform, arch, version):
+def validate_wheel(path, platform, arch, version, *, distribution="radelta-zarr",
+                   module="radelta_zarr", binary_directory="natives", library=None):
     name, wheel_version, _, tags = parse_wheel_filename(path.name)
-    if str(name) != "radelta-zarr" or str(wheel_version) != version:
+    if str(name) != distribution or str(wheel_version) != version:
         raise RuntimeError(f"Unexpected wheel name/version: {path.name}")
     suffix = {("windows", "x86_64"): "win_amd64",
               ("linux", "x86_64"): "x86_64", ("linux", "aarch64"): "aarch64",
@@ -49,9 +50,9 @@ def validate_wheel(path, platform, arch, version):
             valid_platform = tag.platform.startswith(prefix) and tag.platform.endswith("_"+suffix)
         if tag.interpreter != "py3" or tag.abi != "none" or not valid_platform:
             raise RuntimeError(f"Unexpected wheel compatibility tag: {tag}")
-    library = {"windows": "radelta.dll", "linux": "libradelta.so", "macos": "libradelta.dylib"}[platform]
+    library = library or {"windows": "radelta.dll", "linux": "libradelta.so", "macos": "libradelta.dylib"}[platform]
     with ZipFile(path) as archive:
-        member = f"radelta_zarr/natives/{library}"
+        member = f"{module}/{binary_directory}/{library}"
         if archive.namelist().count(member) != 1:
             raise RuntimeError(f"Wheel must contain one bundled {member}")
         wheel_metadata = next(n for n in archive.namelist() if n.endswith(".dist-info/WHEEL"))
@@ -61,6 +62,47 @@ def validate_wheel(path, platform, arch, version):
         declared = {line.removeprefix("Tag: ") for line in metadata.splitlines() if line.startswith("Tag: ")}
         if declared != {str(tag) for tag in tags}:
             raise RuntimeError("Wheel filename and metadata compatibility tags disagree")
+
+
+def build_wheel(package, native_library, platform, arch, destination, version,
+                manylinux_policy="manylinux_2_28", *, distribution="radelta-zarr",
+                module="radelta_zarr", binary_directory="natives"):
+    """Build, repair and validate one self-contained platform wheel."""
+    library = native_library.name
+    environment = dict(os.environ)
+    environment.pop("RADELTA_WHEEL_PLATFORM", None)
+    if platform == "macos":
+        environment = macos_build_environment(native_library, arch)
+    destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    # Keep unrepaired wheels outside dist: only checked wheels are published.
+    with tempfile.TemporaryDirectory(prefix="radelta-wheel-") as temporary:
+        raw, repaired = Path(temporary)/"raw", Path(temporary)/"repaired"
+        subprocess.run([sys.executable, "-m", "build", "--wheel", "--outdir", str(raw), str(package)],
+                       env=environment, check=True)
+        wheels = list(raw.glob("*.whl"))
+        if len(wheels) != 1:
+            raise RuntimeError(f"Expected one raw wheel, found {len(wheels)}")
+        wheel = str(wheels[0])
+        if platform == "linux":
+            command = [sys.executable, "-m", "auditwheel", "repair", "--plat",
+                       f"{manylinux_policy}_{arch}", "--wheel-dir", str(repaired), wheel]
+        elif platform == "windows":
+            # The native DLL is loaded with ctypes; analyze it explicitly.
+            command = [sys.executable, "-m", "delvewheel", "repair", "--analyze-existing",
+                       "--no-mangle", library, "--wheel-dir", str(repaired), wheel]
+        else:
+            architecture = "arm64" if arch == "aarch64" else arch
+            command = ["delocate-wheel", "--require-archs", architecture, "--wheel-dir", str(repaired), wheel]
+        subprocess.run(command, env=environment, check=True)
+        wheels = list(repaired.glob("*.whl"))
+        if len(wheels) != 1:
+            raise RuntimeError(f"Expected one repaired wheel, found {len(wheels)}")
+        validate_wheel(wheels[0], platform, arch, version, distribution=distribution,
+                       module=module, binary_directory=binary_directory, library=library)
+        target = destination/wheels[0].name
+        target.write_bytes(wheels[0].read_bytes())
+        print(target, flush=True)
 
 
 def main():
@@ -82,39 +124,8 @@ def main():
     native_library = package/"radelta_zarr/natives"/library
     if not native_library.is_file():
         parser.error(f"Missing staged native library in {package}; run package_native.py first")
-    environment = dict(os.environ)
-    environment.pop("RADELTA_WHEEL_PLATFORM", None)
-    if args.platform == "macos":
-        environment = macos_build_environment(native_library, args.arch)
-    destination = args.dist_dir.resolve()
-    destination.mkdir(parents=True, exist_ok=True)
-    # Keep unrepaired wheels outside dist: only checked wheels are published.
-    with tempfile.TemporaryDirectory(prefix="radelta-wheel-") as temporary:
-        raw, repaired = Path(temporary)/"raw", Path(temporary)/"repaired"
-        subprocess.run([sys.executable, "-m", "build", "--wheel", "--outdir", str(raw), str(package)],
-                       env=environment, check=True)
-        wheels = list(raw.glob("*.whl"))
-        if len(wheels) != 1:
-            raise RuntimeError(f"Expected one raw wheel, found {len(wheels)}")
-        wheel = str(wheels[0])
-        if args.platform == "linux":
-            command = [sys.executable, "-m", "auditwheel", "repair", "--plat",
-                       f"{args.manylinux_policy}_{args.arch}", "--wheel-dir", str(repaired), wheel]
-        elif args.platform == "windows":
-            # The native DLL is loaded with ctypes; analyze it explicitly.
-            command = [sys.executable, "-m", "delvewheel", "repair", "--analyze-existing",
-                       "--no-mangle", library, "--wheel-dir", str(repaired), wheel]
-        else:
-            architecture = "arm64" if args.arch == "aarch64" else args.arch
-            command = ["delocate-wheel", "--require-archs", architecture, "--wheel-dir", str(repaired), wheel]
-        subprocess.run(command, env=environment, check=True)
-        wheels = list(repaired.glob("*.whl"))
-        if len(wheels) != 1:
-            raise RuntimeError(f"Expected one repaired wheel, found {len(wheels)}")
-        validate_wheel(wheels[0], args.platform, args.arch, version)
-        target = destination/wheels[0].name
-        target.write_bytes(wheels[0].read_bytes())
-        print(target, flush=True)
+    build_wheel(package, native_library, args.platform, args.arch, args.dist_dir,
+                version, args.manylinux_policy)
 
 
 if __name__ == "__main__":

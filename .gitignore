@@ -20,3 +20,7 @@ __pycache__/
 /zarr/python/*.egg-info/
 /zarr/python/build/
 /zarr/python/dist/
+
+/python/*.egg-info/
+/python/build/
+/python/dist/

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=70.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "radelta-hdf5"
-version = "0.7.6"
+version = "0.7.7"
 description = "HDF5 dataset tools for the Radelta compression filter"
 requires-python = ">=3.9"
 license = {text = "BSD-3-Clause"}
@@ -12,3 +12,6 @@ dependencies = ["numpy>=1.21", "h5py>=3.8", "tifffile>=2022.8.12"]
 
 [project.scripts]
 radelta-hdf5 = "radelta_hdf5.__main__:main"
+
+[tool.setuptools.package-data]
+radelta_hdf5 = ["plugins/*.dll", "plugins/*.so", "plugins/*.dylib"]

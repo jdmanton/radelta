@@ -74,6 +74,26 @@ Native release ZIPs include the matching Python codec package under `python/zarr
 Releases also provide self-contained `radelta_zarr` wheels for direct pip
 installation; choose the wheel for your operating system and architecture.
 
+## Python arrays and files
+
+The self-contained `radelta` Python wheel provides a small NumPy API:
+
+```python
+import radelta
+
+encoded = radelta.compress(image)  # lossless uint16 array -> bytes
+restored = radelta.decompress(encoded)
+radelta.write("image.rdlt", image)
+with radelta.open("image.rdlt") as dataset:
+    plane = dataset[10]
+```
+
+Install the wheel for your platform; its native codec is included. NumPy is
+the only core dependency. The optional `radelta_hdf5` wheel adds HDF5 file
+access and automatically registers its bundled filter with h5py. See the
+[Python quickstart and API guide](docs/PYTHON.md) for installation, array axes,
+calibrated lossy compression and partial reads.
+
 ## Release packages
 
 Each version has one GitHub release with separate installation assets:
@@ -82,6 +102,8 @@ Each version has one GitHub release with separate installation assets:
 |---|---|
 | `radelta-<version>-<platform>-<arch>.zip` | CLI, C library/header, documentation and optional Zarr source package |
 | `radelta_zarr-<version>-py3-none-<platform>.whl` | Python Zarr codec/converter with the matching native library |
+| `radelta-<version>-py3-none-<platform>.whl` | NumPy array compression and lazy `.rdlt` file access, with native codec included |
+| `radelta_hdf5-<version>-py3-none-<platform>.whl` | h5py helpers and BDV exporter with an automatically registered native filter |
 | `radelta-hdf5-<version>-<platform>-<arch>.zip` | HDF5 filter, compatible runtime/tools and Python helpers |
 | `radelta-hdf5-filter-<version>-<platform>-<arch>.zip` | Standalone native filter for applications with an existing HDF5 runtime; already included in the ImageJ JAR |
 | `radelta-imagej-<version>.jar` | ImageJ plugin with native codecs and HDF5 decoders for all five platforms |
@@ -224,11 +246,11 @@ exports preserve existing destinations. Virtual-stack decoding errors stop
 processing and export; unreadable planes are never replaced with black pixels.
 Saving over a virtual stack's source file, including an alias, is rejected.
 
-For a complete installation, download `radelta-imagej-0.7.6-fiji.zip`, extract
+For a complete installation, download `radelta-imagej-0.7.7-fiji.zip`, extract
 it, close Fiji and run `python install.py /path/to/Fiji.app`. The installer
 adds missing HDF5 dependencies, reuses existing reader libraries and disables
 older Radelta JARs. See [installation details](imagej-plugin/FIJI_BUNDLE.md).
-If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.6.jar`
+If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.7.jar`
 into Fiji's `plugins` folder, remove older Radelta JARs and restart Fiji.
 The release JAR includes both codecs and HDF5 decoders for all five platforms.
 
@@ -252,7 +274,7 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.7.6.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.7.7.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
 
