@@ -10,6 +10,30 @@ import radelta_hdf5
 
 
 class EmbeddedTests(unittest.TestCase):
+    def test_raw_fallback_retains_filter_and_pixel_semantics(self):
+        rng = np.random.default_rng(78)
+        with tempfile.TemporaryDirectory() as d:
+            for endian in ("<u2", ">u2"):
+                for lossy in (False, True):
+                    q = rng.integers(0, 256, (3, 7, 9), dtype=np.uint16)
+                    image = (q*q+q//2 if lossy else
+                             rng.integers(0, 65536, q.shape, dtype=np.uint16)).astype(endian)
+                    with h5py.File(Path(d)/"raw.h5", "w") as f:
+                        ds = radelta_hdf5.create_dataset(f, "data", data=image,
+                                dtype=endian, chunks=image.shape, lossy=lossy)
+                        ds.id.flush()
+                        mask, payload = ds.id.read_direct_chunk((0, 0, 0))
+                        self.assertEqual(mask, 0)
+                        self.assertEqual(payload[:4], b"RDQ2" if lossy else b"RDM2")
+                        # ND container header and one volume-length prefix.
+                        payload = payload[40:]
+                        self.assertEqual(int.from_bytes(payload[4:6], "little"), 1)
+                        # A single raw block, no model tables or rANS states.
+                        self.assertEqual(len(payload), image.size*(1 if lossy else 2)
+                                         + (68 if lossy else 48) + 20)
+                    with h5py.File(Path(d)/"raw.h5") as f:
+                        np.testing.assert_array_equal(f["data"][:], q*q if lossy else image)
+
     def test_explicit_geometry_and_mandatory_filter(self):
         with tempfile.TemporaryDirectory() as d, h5py.File(Path(d)/"test.h5", "w") as f:
             image = np.arange(3*7*9, dtype=np.uint16).reshape(3, 7, 9).astype(">u2")

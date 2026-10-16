@@ -137,7 +137,7 @@ def create_dataset(group, name, *, shape=None, data=None, chunks=None,
     ds = group.create_dataset(name, shape=shape, dtype=dtype, chunks=chunks,
                               maxshape=maxshape, dcpl=dcpl)
     ds.attrs["axes"] = "TCZYX"[-len(shape):]
-    ds.attrs["radelta_version"] = "0.7.8"
+    ds.attrs["radelta_version"] = "0.8.0"
     ds.attrs["radelta_lossy"] = bool(codec.get("lossy", False))
     if codec.get("lossy", False):
         for key, default in (("offset_adu", 0.0), ("gain_e_per_adu", 1.0), ("noise_step", 2.0)):

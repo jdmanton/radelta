@@ -1,6 +1,6 @@
 # Radelta compression for HDF5
 
-This plugin stores ordinary chunked HDF5 datasets using Radelta 0.7.8.
+This plugin stores ordinary chunked HDF5 datasets using Radelta 0.8.0.
 Each chunk contains an RDL1/RDM2 lossless or RDLQ/RDQ2 calibrated-lossy stream.
 HDF5 handles indexing, metadata and partial reads; the filter only encodes pixels.
 The Rust codec is linked into the plugin, so readers do not need a separate
@@ -35,7 +35,7 @@ The wheel supports Python 3.9+, Windows x86-64, macOS 11+ on Intel/Apple Silicon
 and Linux x86-64/ARM64 with glibc 2.34+. For example, on Windows:
 
 ```powershell
-python -m pip install .\radelta_hdf5-0.7.8-py3-none-win_amd64.whl
+python -m pip install .\radelta_hdf5-0.8.0-py3-none-win_amd64.whl
 ```
 
 The CLI and Python examples below work without `--plugin-path` or
@@ -264,8 +264,11 @@ unknown custom filters as potentially lossy and refuse Fletcher32.
 Invalid datatypes/options cause dataset creation to fail. The plugin converts
 its filter to mandatory during creation, including h5py custom filters, so an
 encoding error cannot silently skip compression or lossy quantisation. Even
-incompressible chunks are stored as Radelta streams; tiny chunks can therefore
-be larger than raw data. Missing plugins cause compressed reads to fail.
+incompressible chunks remain valid Radelta streams, using raw pixel blocks
+when entropy coding would not save space. Tiny chunks still include stream and
+block framing. Raw and entropy-coded blocks use the same version-1 format;
+HDF5's filter mask is not used to bypass lossy quantisation. Missing plugins
+cause compressed reads to fail.
 Decoded dimensions are checked against the stored chunk geometry before
 allocating the output buffer. Every Radelta stream carries CRC-32 checksums of
 its header and blocks, so payload corruption is reported as a read error; a

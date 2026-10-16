@@ -54,6 +54,9 @@ pub const DEFAULT_STREAM_MEMORY_MIB: usize = 2048;
 const VERSION: u16 = 1;
 const ND_VERSION: u16 = 1;
 const LOSSY_VERSION: u16 = 1;
+// Format version 1 supports both entropy-coded and raw block records.
+const RAW_BLOCK_MARKER: u32 = u32::MAX;
+const RAW_RECORD_BYTES: usize = 20;
 const LANES: usize = 4;
 const RANS_L: u32 = 1 << 23;
 #[doc(hidden)]
@@ -393,6 +396,7 @@ struct EncodedBlock {
 #[derive(Debug)]
 struct BorrowedEncodedBlock<'a> {
     depth: usize,
+    raw: bool,
     q_states: [u32; LANES],
     r_states: [u32; LANES],
     q_bytes: &'a [u8],
@@ -410,6 +414,50 @@ impl BorrowedEncodedBlock<'_> {
             return Err(RadeltaError("block checksum mismatch".into()));
         }
         Ok(())
+    }
+}
+
+/// Compare complete records, including rANS states and CRCs, once per block.
+/// If shared models erase the savings, omit them and store the whole volume
+/// raw. This also bounds expansion for tiny volumes by framing alone.
+fn raw_block_plan(
+    blocks: &[EncodedBlock],
+    plane: usize,
+    bytes_per_pixel: usize,
+    model_bytes: usize,
+) -> Vec<bool> {
+    let record_bytes = if bytes_per_pixel == 2 { 52 } else { 32 };
+    let mut chosen_bytes = model_bytes as u128;
+    let mut raw_bytes = 0u128;
+    let mut all_fit = true;
+    let mut raw = Vec::with_capacity(blocks.len());
+    for b in blocks {
+        let stored =
+            RAW_RECORD_BYTES as u128 + b.depth as u128 * plane as u128 * bytes_per_pixel as u128;
+        let coded = record_bytes as u128 + b.q_bytes.len() as u128 + b.r_bytes.len() as u128;
+        let fits = stored - RAW_RECORD_BYTES as u128 <= u32::MAX as u128;
+        all_fit &= fits;
+        let use_raw = fits && coded >= stored;
+        raw.push(use_raw);
+        chosen_bytes += if use_raw { stored } else { coded };
+        raw_bytes += stored;
+    }
+    if all_fit && chosen_bytes >= raw_bytes {
+        raw.fill(true);
+    }
+    raw
+}
+
+fn append_raw_u16(out: &mut Vec<u8>, pixels: &[u16]) {
+    #[cfg(target_endian = "little")]
+    // SAFETY: every byte in a live u16 slice is initialized and can be read
+    // through u8. The borrowed view does not outlive pixels.
+    out.extend_from_slice(unsafe {
+        std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), std::mem::size_of_val(pixels))
+    });
+    #[cfg(target_endian = "big")]
+    for &pixel in pixels {
+        out.extend_from_slice(&pixel.to_le_bytes());
     }
 }
 
@@ -1700,8 +1748,23 @@ pub fn compress_lossy_u16_with_stats(
     }
     let seconds_encode = encode_start.elapsed().as_secs_f64();
 
-    let q_model_blob = q_model.serialize()?;
-    let q_stream_bytes: usize = encoded.iter().map(|b| b.q_bytes.len()).sum();
+    let mut q_model_blob = q_model.serialize()?;
+    let plane = dims.x * dims.y;
+    let raw = raw_block_plan(&encoded, plane, 1, q_model_blob.len());
+    if raw.iter().all(|&v| v) {
+        q_model_blob.clear();
+    }
+    let q_stream_bytes: usize = encoded
+        .iter()
+        .zip(&raw)
+        .map(|(b, &raw)| {
+            if raw {
+                b.depth * plane
+            } else {
+                b.q_bytes.len()
+            }
+        })
+        .sum();
     let model_bytes = q_model_blob.len();
 
     let mut out = Vec::with_capacity(q_stream_bytes + model_bytes + encoded.len() * 40 + 128);
@@ -1726,10 +1789,22 @@ pub fn compress_lossy_u16_with_stats(
     out.extend_from_slice(&q_model_blob);
     put_header_crc(&mut out);
 
-    for b in &encoded {
+    for (b, &raw) in encoded.iter().zip(&raw) {
         let start = out.len();
         put_u32(&mut out, b.z0 as u32);
         put_u32(&mut out, b.depth as u32);
+        if raw {
+            let pixels = &q[b.z0 * plane..(b.z0 + b.depth) * plane];
+            put_u32(&mut out, RAW_BLOCK_MARKER);
+            put_u32(
+                &mut out,
+                u32::try_from(pixels.len())
+                    .map_err(|_| RadeltaError("raw block exceeds u32 length".into()))?,
+            );
+            out.extend_from_slice(pixels);
+            put_block_crc(&mut out, start);
+            continue;
+        }
         put_u32(&mut out, b.q_bytes.len() as u32);
         for &st in &b.q_states {
             put_u32(&mut out, st);
@@ -1828,10 +1903,31 @@ pub fn compress_u16_with_stats(
     }
     let seconds_encode = encode_start.elapsed().as_secs_f64();
 
-    let q_model_blob = q_model.serialize()?;
-    let r_model_blob = r_model.serialize()?;
-    let q_stream_bytes: usize = encoded.iter().map(|b| b.q_bytes.len()).sum();
-    let r_stream_bytes: usize = encoded.iter().map(|b| b.r_bytes.len()).sum();
+    let mut q_model_blob = q_model.serialize()?;
+    let mut r_model_blob = r_model.serialize()?;
+    let plane = dims.x * dims.y;
+    let raw = raw_block_plan(&encoded, plane, 2, q_model_blob.len() + r_model_blob.len());
+    if raw.iter().all(|&v| v) {
+        q_model_blob.clear();
+        r_model_blob.clear();
+    }
+    // Raw payload bytes are included in q_stream_bytes for accounting.
+    let q_stream_bytes: usize = encoded
+        .iter()
+        .zip(&raw)
+        .map(|(b, &raw)| {
+            if raw {
+                b.depth * plane * 2
+            } else {
+                b.q_bytes.len()
+            }
+        })
+        .sum();
+    let r_stream_bytes: usize = encoded
+        .iter()
+        .zip(&raw)
+        .map(|(b, &raw)| if raw { 0 } else { b.r_bytes.len() })
+        .sum();
     let model_bytes = q_model_blob.len() + r_model_blob.len();
 
     let mut out = Vec::with_capacity(
@@ -1857,10 +1953,22 @@ pub fn compress_u16_with_stats(
     out.extend_from_slice(&r_model_blob);
     put_header_crc(&mut out);
 
-    for b in &encoded {
+    for (b, &raw) in encoded.iter().zip(&raw) {
         let start = out.len();
         put_u32(&mut out, b.z0 as u32);
         put_u32(&mut out, b.depth as u32);
+        if raw {
+            let pixels = &input[b.z0 * plane..(b.z0 + b.depth) * plane];
+            put_u32(&mut out, RAW_BLOCK_MARKER);
+            put_u32(
+                &mut out,
+                u32::try_from(std::mem::size_of_val(pixels))
+                    .map_err(|_| RadeltaError("raw block exceeds u32 length".into()))?,
+            );
+            append_raw_u16(&mut out, pixels);
+            put_block_crc(&mut out, start);
+            continue;
+        }
         put_u32(&mut out, b.q_bytes.len() as u32);
         put_u32(&mut out, b.r_bytes.len() as u32);
         for &s in &b.q_states {
@@ -1897,8 +2005,8 @@ struct ParsedLosslessStream<'a> {
     mode: ContextMode,
     scale_bits: u8,
     q_alphabet: usize,
-    q_model: StaticModel,
-    r_model: StaticModel,
+    q_model: Option<StaticModel>,
+    r_model: Option<StaticModel>,
     blocks: Vec<BorrowedEncodedBlock<'a>>,
 }
 
@@ -1964,25 +2072,30 @@ fn parse_lossless_stream(data: &[u8]) -> Result<ParsedLosslessStream<'_>> {
     let q_model_blob = rd.take(q_model_len)?;
     let r_model_blob = rd.take(r_model_len)?;
     check_header_crc(&mut rd, "RDL1")?;
-    let q_model = StaticModel::deserialize(q_model_blob)?;
-    let r_model = StaticModel::deserialize(r_model_blob)?;
-    if q_model.scale_bits != scale_bits || r_model.scale_bits != scale_bits {
-        return Err(RadeltaError("model/header scale-bit mismatch".into()));
-    }
     let q_alphabet = q_max + 1;
     let r_alphabet = r_max + 1;
-    if q_model.alphabet != q_alphabet
-        || r_model.contexts != q_alphabet
-        || r_model.alphabet != r_alphabet
-    {
-        return Err(RadeltaError("model/header alphabet mismatch".into()));
-    }
-    if q_model.contexts != q_context_count(q_alphabet, mode) {
-        return Err(RadeltaError("q context-table shape mismatch".into()));
-    }
+    let (q_model, r_model) = if q_model_blob.is_empty() && r_model_blob.is_empty() {
+        (None, None)
+    } else {
+        let q_model = StaticModel::deserialize(q_model_blob)?;
+        let r_model = StaticModel::deserialize(r_model_blob)?;
+        if q_model.scale_bits != scale_bits || r_model.scale_bits != scale_bits {
+            return Err(RadeltaError("model/header scale-bit mismatch".into()));
+        }
+        if q_model.alphabet != q_alphabet
+            || r_model.contexts != q_alphabet
+            || r_model.alphabet != r_alphabet
+        {
+            return Err(RadeltaError("model/header alphabet mismatch".into()));
+        }
+        if q_model.contexts != q_context_count(q_alphabet, mode) {
+            return Err(RadeltaError("q context-table shape mismatch".into()));
+        }
+        (Some(q_model), Some(r_model))
+    };
 
-    // Minimum record: four u32 fields, eight rANS states and a CRC.
-    if nblocks > rd.data.len().saturating_sub(rd.pos) / 52 {
+    let min_record = RAW_RECORD_BYTES;
+    if nblocks > rd.data.len().saturating_sub(rd.pos) / min_record {
         return Err(RadeltaError(
             "RDL1 block count exceeds available records".into(),
         ));
@@ -2004,20 +2117,39 @@ fn parse_lossless_stream(data: &[u8]) -> Result<ParsedLosslessStream<'_>> {
                 "RDL1 block layout is inconsistent with the header".into(),
             ));
         }
+        let raw = q_len == RAW_BLOCK_MARKER as usize;
+        if raw {
+            let expected = depth
+                .checked_mul(dims.x)
+                .and_then(|v| v.checked_mul(dims.y))
+                .and_then(|v| v.checked_mul(2))
+                .ok_or_else(|| RadeltaError("raw block size overflow".into()))?;
+            if r_len != expected {
+                return Err(RadeltaError("invalid raw block length".into()));
+            }
+        } else if q_model.is_none() {
+            return Err(RadeltaError(
+                "compressed block has no probability models".into(),
+            ));
+        }
         let mut q_states = [0u32; LANES];
         let mut r_states = [0u32; LANES];
-        for state in &mut q_states {
-            *state = rd.u32()?;
-        }
-        for state in &mut r_states {
-            *state = rd.u32()?;
-        }
-        let q_bytes = rd.take(q_len)?;
-        let r_bytes = rd.take(r_len)?;
+        let (q_bytes, r_bytes) = if raw {
+            (rd.take(r_len)?, &[][..])
+        } else {
+            for state in &mut q_states {
+                *state = rd.u32()?;
+            }
+            for state in &mut r_states {
+                *state = rd.u32()?;
+            }
+            (rd.take(q_len)?, rd.take(r_len)?)
+        };
         let record = &data[start..rd.pos];
         let crc = rd.u32()?;
         blocks.push(BorrowedEncodedBlock {
             depth,
+            raw,
             q_states,
             r_states,
             q_bytes,
@@ -2057,12 +2189,22 @@ fn decode_lossless_stream_into(stream: &ParsedLosslessStream<'_>, out: &mut [u16
         .checked_mul(plane)
         .ok_or_else(|| RadeltaError("decoded block size overflow".into()))?;
 
-    let q_table = packed_q_decode_table(&stream.q_model)?;
-    let r_table = packed_r_decode_table(&stream.r_model)?;
+    let q_table = stream
+        .q_model
+        .as_ref()
+        .map(packed_q_decode_table)
+        .transpose()?
+        .unwrap_or_default();
+    let r_table = stream
+        .r_model
+        .as_ref()
+        .map(packed_r_decode_table)
+        .transpose()?
+        .unwrap_or_default();
     let tables = PackedDecodeTables {
         q: &q_table,
         r: &r_table,
-        total: stream.q_model.total,
+        total: 1 << stream.scale_bits,
         scale_bits: stream.scale_bits,
     };
 
@@ -2072,6 +2214,12 @@ fn decode_lossless_stream_into(stream: &ParsedLosslessStream<'_>, out: &mut [u16
             block.verify()?;
             if chunk.len() != block.depth * plane {
                 return Err(RadeltaError("decoded block/output layout mismatch".into()));
+            }
+            if block.raw {
+                for (pixel, &bytes) in chunk.iter_mut().zip(block.q_bytes.as_chunks::<2>().0) {
+                    *pixel = u16::from_le_bytes(bytes);
+                }
+                return Ok(());
             }
             decode_block_into_packed(
                 block,
@@ -2117,7 +2265,7 @@ struct ParsedLossyStream<'a> {
     block_depth: usize,
     mode: ContextMode,
     q_alphabet: usize,
-    q_model: StaticModel,
+    q_model: Option<StaticModel>,
     blocks: Vec<BorrowedEncodedBlock<'a>>,
     reconstruction: [u16; MAX_Q_ALPHABET],
 }
@@ -2185,17 +2333,22 @@ fn parse_lossy_stream(data: &[u8]) -> Result<ParsedLossyStream<'_>> {
     }
     let q_model_blob = rd.take(q_model_len)?;
     check_header_crc(&mut rd, "RDLQ")?;
-    let q_model = StaticModel::deserialize(q_model_blob)?;
-    if q_model.scale_bits != scale_bits {
-        return Err(RadeltaError("model/header scale-bit mismatch".into()));
-    }
     let q_alphabet = q_max + 1;
-    if q_model.alphabet != q_alphabet || q_model.contexts != q_context_count(q_alphabet, mode) {
-        return Err(RadeltaError("lossy q model/header shape mismatch".into()));
-    }
+    let q_model = if q_model_blob.is_empty() {
+        None
+    } else {
+        let q_model = StaticModel::deserialize(q_model_blob)?;
+        if q_model.scale_bits != scale_bits {
+            return Err(RadeltaError("model/header scale-bit mismatch".into()));
+        }
+        if q_model.alphabet != q_alphabet || q_model.contexts != q_context_count(q_alphabet, mode) {
+            return Err(RadeltaError("lossy q model/header shape mismatch".into()));
+        }
+        Some(q_model)
+    };
 
-    // Minimum record: three u32 fields, four rANS states and a CRC.
-    if nblocks > rd.data.len().saturating_sub(rd.pos) / 32 {
+    let min_record = RAW_RECORD_BYTES;
+    if nblocks > rd.data.len().saturating_sub(rd.pos) / min_record {
         return Err(RadeltaError(
             "RDLQ block count exceeds available records".into(),
         ));
@@ -2216,15 +2369,34 @@ fn parse_lossy_stream(data: &[u8]) -> Result<ParsedLossyStream<'_>> {
                 "RDLQ block layout is inconsistent with the header".into(),
             ));
         }
+        let raw = q_len == RAW_BLOCK_MARKER as usize;
         let mut q_states = [0u32; LANES];
-        for st in &mut q_states {
-            *st = rd.u32()?;
-        }
-        let q_bytes = rd.take(q_len)?;
+        let q_bytes = if raw {
+            let raw_len = rd.u32()? as usize;
+            let expected = depth
+                .checked_mul(dims.x)
+                .and_then(|v| v.checked_mul(dims.y))
+                .ok_or_else(|| RadeltaError("raw block size overflow".into()))?;
+            if raw_len != expected {
+                return Err(RadeltaError("invalid raw block length".into()));
+            }
+            rd.take(raw_len)?
+        } else {
+            if q_model.is_none() {
+                return Err(RadeltaError(
+                    "compressed block has no probability model".into(),
+                ));
+            }
+            for st in &mut q_states {
+                *st = rd.u32()?;
+            }
+            rd.take(q_len)?
+        };
         let record = &data[start..rd.pos];
         let crc = rd.u32()?;
         blocks.push(BorrowedEncodedBlock {
             depth,
+            raw,
             q_states,
             r_states: [RANS_L; LANES],
             q_bytes,
@@ -2266,17 +2438,31 @@ fn decode_lossy_stream_into(stream: &ParsedLossyStream<'_>, out: &mut [u16]) -> 
         .block_depth
         .checked_mul(plane)
         .ok_or_else(|| RadeltaError("decoded block size overflow".into()))?;
-    let q_table = packed_q_decode_table(&stream.q_model)?;
+    let q_table = stream
+        .q_model
+        .as_ref()
+        .map(packed_q_decode_table)
+        .transpose()?
+        .unwrap_or_default();
     let tables = PackedDecodeTables {
         q: &q_table,
         r: &[],
-        total: stream.q_model.total,
-        scale_bits: stream.q_model.scale_bits,
+        total: stream.q_model.as_ref().map_or(0, |m| m.total),
+        scale_bits: stream.q_model.as_ref().map_or(0, |m| m.scale_bits),
     };
     out.par_chunks_mut(chunk_voxels)
         .zip(stream.blocks.par_iter())
         .try_for_each(|(chunk, block)| {
             block.verify()?;
+            if block.raw {
+                for (pixel, &q) in chunk.iter_mut().zip(block.q_bytes) {
+                    if q as usize >= stream.q_alphabet {
+                        return Err(RadeltaError("raw lossy symbol exceeds q maximum".into()));
+                    }
+                    *pixel = stream.reconstruction[q as usize];
+                }
+                return Ok(());
+            }
             // Context prediction needs q throughout this block. Reconstruct only
             // after all its q symbols are decoded; blocks are independent.
             decode_q_block_into_packed(
@@ -2828,6 +3014,212 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
 
+    fn noisy_pixels(len: usize) -> Vec<u16> {
+        let mut state = 0x12345678u32;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn raw_plan_counts_record_and_shared_model_overhead() {
+        let block = EncodedBlock {
+            z0: 0,
+            depth: 1,
+            q_states: [RANS_L; LANES],
+            r_states: [RANS_L; LANES],
+            q_bytes: vec![0; 168],
+            r_bytes: Vec::new(),
+        };
+        // 52 + 168 == 20 + 100*2: ties use raw, including rANS states.
+        assert_eq!(raw_block_plan(&[block], 100, 2, 0), [true]);
+        let block = EncodedBlock {
+            z0: 0,
+            depth: 1,
+            q_states: [RANS_L; LANES],
+            r_states: [RANS_L; LANES],
+            q_bytes: vec![0; 10],
+            r_bytes: Vec::new(),
+        };
+        assert_eq!(
+            raw_block_plan(std::slice::from_ref(&block), 100, 2, 0),
+            [false]
+        );
+        assert_eq!(raw_block_plan(&[block], 100, 2, 158), [true]);
+    }
+
+    #[test]
+    fn incompressible_lossless_blocks_are_raw_without_models() {
+        let dims = Dims {
+            x: 128,
+            y: 64,
+            z: 9,
+        };
+        let input = noisy_pixels(dims.voxels().unwrap());
+        let (mut encoded, stats) =
+            compress_u16_with_stats(&input, dims, Options::default()).unwrap();
+        let stream = parse_lossless_stream(&encoded).unwrap();
+        assert!(stream.blocks.iter().all(|b| b.raw));
+        assert!(stream.q_model.is_none() && stream.r_model.is_none());
+        assert_eq!(stats.model_bytes, 0);
+        assert_eq!(encoded.len(), input.len() * 2 + 48 + 3 * RAW_RECORD_BYTES);
+        assert_eq!(decompress_u16(&encoded).unwrap().0, input);
+        let mut direct = vec![0; input.len()];
+        decompress_u16_into(&encoded, &mut direct).unwrap();
+        assert_eq!(direct, input);
+        set_metadata(&mut encoded, b"calibration").unwrap();
+        assert_eq!(read_metadata(&encoded).unwrap(), b"calibration");
+        assert_eq!(decompress_u16(&encoded).unwrap().0, input);
+    }
+
+    #[test]
+    fn mixed_raw_and_compressed_blocks_roundtrip_with_partial_tail() {
+        let dims = Dims { x: 1, y: 1, z: 257 };
+        let mut input = vec![0; dims.voxels().unwrap()];
+        input[256] = 54321;
+        let encoded = compress_u16(
+            &input,
+            dims,
+            Options {
+                block_depth: 128,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let stream = parse_lossless_stream(&encoded).unwrap();
+        assert_eq!(
+            stream.blocks.iter().map(|b| b.raw).collect::<Vec<_>>(),
+            [false, false, true]
+        );
+        assert_eq!(stream.blocks[2].depth, 1);
+        assert_eq!(stream.blocks[2].q_bytes, &54321u16.to_le_bytes());
+        assert_eq!(decompress_u16(&encoded).unwrap().0, input);
+
+        let encoded = compress_lossy_u16(
+            &input,
+            dims,
+            LossyOptions {
+                block_depth: 128,
+                ..LossyOptions::default()
+            },
+        )
+        .unwrap();
+        let stream = parse_lossy_stream(&encoded).unwrap();
+        assert_eq!(
+            stream.blocks.iter().map(|b| b.raw).collect::<Vec<_>>(),
+            [false, false, true]
+        );
+        let decoded = decompress_u16(&encoded).unwrap().0;
+        assert_eq!(&decoded[..256], &input[..256]);
+        assert_eq!(
+            decoded[256],
+            lossy_reconstruct(lossy_quantize(input[256], 0., 1., 2.) as u8, 0., 1., 2.)
+        );
+    }
+
+    #[test]
+    fn compressed_streams_use_version_one() {
+        let dims = Dims {
+            x: 128,
+            y: 64,
+            z: 8,
+        };
+        let input = vec![100; dims.voxels().unwrap()];
+        for encoded in [
+            compress_u16(&input, dims, Options::default()).unwrap(),
+            compress_lossy_u16(&input, dims, LossyOptions::default()).unwrap(),
+        ] {
+            assert_eq!(u16::from_le_bytes([encoded[4], encoded[5]]), 1);
+            assert_eq!(decompress_u16(&encoded).unwrap().0, input);
+        }
+    }
+
+    #[test]
+    fn lossy_raw_blocks_preserve_quantization() {
+        // Uniform q symbols are incompressible even though raw q uses only
+        // one byte per pixel. The fallback must not return original ADUs.
+        let dims = Dims {
+            x: 256,
+            y: 128,
+            z: 5,
+        };
+        let input: Vec<u16> = noisy_pixels(dims.voxels().unwrap())
+            .iter()
+            .map(|&v| {
+                let q = v & 255;
+                q * q + q / 2
+            })
+            .collect();
+        let options = LossyOptions::default();
+        let encoded = compress_lossy_u16(&input, dims, options).unwrap();
+        let stream = parse_lossy_stream(&encoded).unwrap();
+        assert!(stream.blocks.iter().all(|b| b.raw));
+        assert!(stream.q_model.is_none());
+        assert_eq!(encoded.len(), input.len() + 68 + 2 * RAW_RECORD_BYTES);
+        let expected: Vec<_> = input
+            .iter()
+            .map(|&v| lossy_reconstruct(lossy_quantize(v, 0.0, 1.0, 2.0) as u8, 0.0, 1.0, 2.0))
+            .collect();
+        assert_ne!(expected, input);
+        assert_eq!(decompress_u16(&encoded).unwrap().0, expected);
+    }
+
+    #[test]
+    fn raw_records_reject_damage_invalid_lengths_and_missing_models() {
+        let dims = Dims { x: 3, y: 2, z: 1 };
+        for mut encoded in [
+            compress_u16(&[7; 6], dims, Options::default()).unwrap(),
+            compress_lossy_u16(&[7; 6], dims, LossyOptions::default()).unwrap(),
+        ] {
+            let start = if &encoded[..4] == MAGIC { 48 } else { 68 };
+            assert_eq!(
+                u32::from_le_bytes(encoded[start + 8..start + 12].try_into().unwrap()),
+                RAW_BLOCK_MARKER
+            );
+            let mut damaged = encoded.clone();
+            damaged[start + 16] ^= 1;
+            assert!(decompress_u16(&damaged).is_err());
+            assert!(decompress_u16(&encoded[..encoded.len() - 1]).is_err());
+            let mut length = encoded.clone();
+            length[start + 12..start + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(decompress_u16(&length)
+                .unwrap_err()
+                .0
+                .contains("raw block length"));
+            let mut no_model = encoded.clone();
+            no_model[start + 8..start + 12].copy_from_slice(&0u32.to_le_bytes());
+            assert!(decompress_u16(&no_model)
+                .unwrap_err()
+                .0
+                .contains("probability model"));
+            // Version 2 is not part of the format. Reject it explicitly.
+            encoded[4..6].copy_from_slice(&2u16.to_le_bytes());
+            let crc = header_crc(&encoded, start - 4);
+            encoded[start - 4..start].copy_from_slice(&crc.to_le_bytes());
+            assert!(decompress_u16(&encoded)
+                .unwrap_err()
+                .0
+                .contains("unsupported"));
+            assert!(inspect_dims(&encoded)
+                .unwrap_err()
+                .0
+                .contains("unsupported"));
+        }
+        let mut encoded = compress_lossy_u16(&[7; 6], dims, LossyOptions::default()).unwrap();
+        encoded[68 + 16] = 255; // q_max is much smaller.
+        encoded.truncate(encoded.len() - 4);
+        put_block_crc(&mut encoded, 68);
+        assert!(decompress_u16(&encoded)
+            .unwrap_err()
+            .0
+            .contains("q maximum"));
+    }
+
     fn structured_volume(dims: Dims) -> Vec<u16> {
         let mut data = Vec::with_capacity(dims.voxels().unwrap());
         for z in 0..dims.z {
@@ -3224,7 +3616,7 @@ mod tests {
     }
 
     #[test]
-    fn format_versions_are_one() {
+    fn all_format_versions_are_one() {
         assert_eq!(VERSION, 1);
         assert_eq!(ND_VERSION, 1);
         assert_eq!(LOSSY_VERSION, 1);

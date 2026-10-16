@@ -162,6 +162,37 @@ Each block stores:
 | r byte stack | variable |
 | block CRC-32 | `u32` |
 
+### Raw block fallback
+
+The encoder compares each complete compressed record (52 bytes of framing plus
+its q/r byte stacks) with a raw record (20 bytes of framing plus two bytes per
+pixel). Ties use raw. If the selected records plus their shared probability
+models are no smaller than an entirely raw volume, all blocks are stored raw
+and both model lengths are zero. This includes the model overhead when deciding
+whether compression saves space. File, container and metadata framing still
+occupy space beyond the pixel payload.
+
+Format version `1` supports both raw and compressed blocks in the same stream.
+Compressed records have the layout above. A raw record uses the following layout:
+
+| Field | Type |
+| --- | --- |
+| starting Z | `u32` |
+| depth | `u32` |
+| raw marker (`0xffffffff`) | `u32` |
+| raw byte length (`X * Y * depth * 2`) | `u32` |
+| original pixels in ZYX order | little-endian `uint16` bytes |
+| block CRC-32 | `u32` |
+
+There are no rANS states in a raw record. Its marker occupies the q-stack
+length field; the raw byte length occupies the r-stack length field. Models
+may be absent only when every block is raw. Readers validate the exact raw
+length and block geometry before decoding. The CRC covers the entire record,
+including the marker and raw pixels.
+
+The C/Python APIs, filter options and outer container layouts are the same for
+raw and compressed blocks. There is no separate version-2 format.
+
 ### Checksums
 
 All checksums are CRC-32/ISO-HDLC (as used by zlib and PNG). The header CRC
@@ -200,6 +231,14 @@ ADU       = round(offset_adu + electrons / gain_e_per_adu)
 with the result clamped to `uint16`.
 
 The RDLQ header stores the XYZ dimensions, block/coder parameters, camera offset, gain, noise step, q model, and block count, followed by a header CRC-32. Each block contains its Z position/depth, four q rANS states, and q byte stack, followed by a block CRC-32. Both checksums follow the RDL1 rules above.
+
+RDLQ version `1` also supports raw records. These store the already quantized
+`q` values as one byte per pixel, retaining exactly the same calibrated lossy
+reconstruction. Their layout is starting Z, depth, `0xffffffff`, raw byte
+length (`X * Y * depth`), raw q bytes, and CRC-32. Compressed records occupy
+32 framing bytes plus the q stack; raw records occupy 20 framing bytes plus
+the q bytes. Selection and model omission rules match RDL1. Readers
+reject raw q symbols above the header's q maximum.
 
 ## Multidimensional files: RDM2 and RDQ2
 
@@ -303,8 +342,8 @@ validated when reading it. Empty metadata removes the block and clears the flag.
 The limit is a process-wide allocation policy, not stored in the file or imposed
 by the format. The footer allows readers to locate metadata without scanning or inflating image
 payloads. Pixel-only memory decoders skip the block without inflating metadata;
-metadata APIs and file readers validate its contents. Container versions remain
-`1`.
+metadata APIs and file readers validate its contents. Attaching metadata does
+not change the pixel format version.
 
 ### TIFF metadata payload
 
