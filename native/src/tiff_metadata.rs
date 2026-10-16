@@ -142,7 +142,8 @@ pub fn capture(path: &Path, layout: &ResolvedLayout) -> Result<Vec<u8>, String> 
         .map_err(|e| e.to_string())?
         .with_limits(tiff_limits());
     let desc = dec.get_tag_ascii_string(Tag::ImageDescription).ok();
-    let inferred = infer_layout_from_description(desc.as_deref(), d.x, d.y, pages).unwrap_or(None);
+    let inferred =
+        infer_layout_from_description(desc.as_deref(), d.x, d.y, pages, path).unwrap_or(None);
     let valid = match inferred {
         Some(ref v) => {
             v.t == d.t

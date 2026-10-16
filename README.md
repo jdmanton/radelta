@@ -204,7 +204,7 @@ See [docs/CLI.md](docs/CLI.md) for the full command-line reference.
 The CLI reads grayscale `uint16` TIFF data and understands:
 
 - ordinary multipage TIFF stacks;
-- single-file OME-TIFF metadata;
+- OME-TIFF metadata, including the local planes of a multi-file acquisition;
 - ImageJ/Fiji hyperstacks; and
 - supported contiguous ImageJ/tifffile hyperstacks.
 
@@ -246,11 +246,11 @@ exports preserve existing destinations. Virtual-stack decoding errors stop
 processing and export; unreadable planes are never replaced with black pixels.
 Saving over a virtual stack's source file, including an alias, is rejected.
 
-For a complete installation, download `radelta-imagej-0.7.7-fiji.zip`, extract
+For a complete installation, download `radelta-imagej-0.7.8-fiji.zip`, extract
 it, close Fiji and run `python install.py /path/to/Fiji.app`. The installer
 adds missing HDF5 dependencies, reuses existing reader libraries and disables
 older Radelta JARs. See [installation details](imagej-plugin/FIJI_BUNDLE.md).
-If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.7.jar`
+If the HDF5 importer is already installed, copy only `radelta-imagej-0.7.8.jar`
 into Fiji's `plugins` folder, remove older Radelta JARs and restart Fiji.
 The release JAR includes both codecs and HDF5 decoders for all five platforms.
 
@@ -274,7 +274,7 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.7.7.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.7.8.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
 

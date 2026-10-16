@@ -1,6 +1,6 @@
 [package]
 name = "radelta"
-version = "0.7.7"
+version = "0.7.8"
 edition = "2021"
 description = "High-throughput lossless and calibrated-lossy uint16 multidimensional image codec"
 license = "BSD-3-Clause"
@@ -23,6 +23,7 @@ lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "s
 rayon = "1"
 crc32fast = "1"
 same-file = "1"
+roxmltree = "0.21"
 tiff = "0.11"
 
 [profile.release]

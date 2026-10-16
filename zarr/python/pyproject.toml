@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "radelta-zarr"
-version = "0.7.7"
+version = "0.7.8"
 description = "Native Radelta codecs and OME-Zarr tools for uint16 microscopy"
 requires-python = ">=3.11"
 license = {text = "BSD-3-Clause"}

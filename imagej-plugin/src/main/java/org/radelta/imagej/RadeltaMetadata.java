@@ -13,7 +13,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import org.xml.sax.SAXException;
 
 /** Application-owned metadata. No Java object deserialization is used. */
 final class RadeltaMetadata {
@@ -297,7 +300,8 @@ final class RadeltaMetadata {
                     c.yOrigin = optionalNumber(p, "yorigin", c.yOrigin);
                     c.zOrigin = optionalNumber(p, "zorigin", c.zOrigin);
                     if (p.containsKey("tunit")) c.setTimeUnit(p.getProperty("tunit"));
-                } else if (valid && description.contains("<OME")) applyOme(c, description);
+                } else if (valid && (description.contains("<OME") || description.contains(":OME")))
+                    applyOme(c, description);
             }
         } catch (java.nio.BufferUnderflowException | IllegalArgumentException e) {
             throw new IOException("Invalid TIFF metadata", e);
@@ -339,17 +343,41 @@ final class RadeltaMetadata {
         return p.containsKey(key) ? Double.parseDouble(p.getProperty(key)) : fallback;
     }
 
+    private static DocumentBuilder omeParser() throws ParserConfigurationException {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        factory.setValidating(false);
+        factory.setXIncludeAware(false);
+        factory.setExpandEntityReferences(false);
+        // These controls are required: an unsupported essential feature still
+        // fails parser construction rather than allowing external XML access.
+        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+        denyExternalAccessIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_DTD);
+        denyExternalAccessIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_SCHEMA);
+        DocumentBuilder builder = factory.newDocumentBuilder();
+        builder.setEntityResolver((publicId, systemId) -> {
+            throw new SAXException("External XML resources are disabled for OME metadata");
+        });
+        return builder;
+    }
+
+    private static void denyExternalAccessIfSupported(DocumentBuilderFactory factory, String property) {
+        try {
+            factory.setAttribute(property, "");
+        } catch (IllegalArgumentException unsupported) {
+            // Fiji's Xerces 2.12.2 lacks these JAXP 1.5 attributes. The required
+            // DTD/entity features and rejecting resolver above remain active.
+        }
+    }
+
     private static void applyOme(Calibration c, String xml) throws IOException {
         try {
-            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(true);
-            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
-            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
             NodeList list =
-                    factory.newDocumentBuilder()
+                    omeParser()
                             .parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)))
                             .getElementsByTagNameNS("*", "Pixels");
             if (list.getLength() == 0) return;

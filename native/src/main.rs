@@ -1,4 +1,6 @@
+mod ome;
 mod tiff_metadata;
+use ome::infer_ome_layout;
 use radelta_native::{
     choose_stream_chunk_depth, compress_lossy_u16_nd_with_stats, compress_lossy_u16_with_stats,
     compress_u16_nd_with_stats, compress_u16_with_stats, decompress_u16_nd_into, ContextMode, Dims,
@@ -84,7 +86,7 @@ fn usage() -> ! {
          TIFF metadata is preserved; decode restores source page order by default.\n\n\
          Metadata inference:\n  \\
            * OME-TIFF: SizeT/SizeC/SizeZ + DimensionOrder from OME-XML.\n  \\
-             Explicit single-file TiffData IFD mappings are honored.\n  \\
+             Local TiffData IFD mappings and complete file subsets are honored.\n  \\
            * ImageJ/Fiji TIFF: channels/slices/frames; ImageJ CZT storage order.\n  \\
            * Plain TIFF fallback: T=1, C=1, Z=number of pages.\n\n\
          Examples:\n  \\
@@ -281,229 +283,6 @@ fn validate_page_order(order: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn xml_start_tags<'a>(text: &'a str, local_name: &str) -> Vec<&'a str> {
-    let mut out = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let Some(rel) = text[i..].find('<') else {
-            break;
-        };
-        let start = i + rel;
-        let rest = &text[start + 1..];
-        if rest.starts_with('/') || rest.starts_with('!') || rest.starts_with('?') {
-            i = start + 1;
-            continue;
-        }
-        let token_end = rest
-            .find(|ch: char| ch.is_ascii_whitespace() || ch == '>' || ch == '/')
-            .unwrap_or(rest.len());
-        let token = &rest[..token_end];
-        let local = token.rsplit(':').next().unwrap_or(token);
-        if local == local_name {
-            if let Some(close) = text[start..].find('>') {
-                out.push(&text[start..start + close + 1]);
-                i = start + close + 1;
-                continue;
-            }
-        }
-        i = start + 1;
-    }
-    out
-}
-
-fn xml_attr(tag: &str, name: &str) -> Option<String> {
-    let mut pos = 0usize;
-    while let Some(rel) = tag[pos..].find(name) {
-        let p = pos + rel;
-        let before_ok = p == 0 || !tag.as_bytes()[p - 1].is_ascii_alphanumeric();
-        let after = p + name.len();
-        if before_ok {
-            let mut j = after;
-            while j < tag.len() && tag.as_bytes()[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < tag.len() && tag.as_bytes()[j] == b'=' {
-                j += 1;
-                while j < tag.len() && tag.as_bytes()[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < tag.len() && (tag.as_bytes()[j] == b'"' || tag.as_bytes()[j] == b'\'') {
-                    let quote = tag.as_bytes()[j];
-                    let value_start = j + 1;
-                    if let Some(k) = tag.as_bytes()[value_start..]
-                        .iter()
-                        .position(|&b| b == quote)
-                    {
-                        return Some(tag[value_start..value_start + k].to_string());
-                    }
-                }
-            }
-        }
-        pos = after;
-    }
-    None
-}
-
-fn parse_usize_attr(tag: &str, name: &str) -> Result<Option<usize>, String> {
-    match xml_attr(tag, name) {
-        Some(v) => Ok(Some(
-            v.parse::<usize>()
-                .map_err(|_| format!("invalid OME {name}=\"{v}\""))?,
-        )),
-        None => Ok(None),
-    }
-}
-
-fn coords_to_ome_linear(t: usize, c: usize, z: usize, fastest_to_slowest: &str, d: Dims5) -> usize {
-    let mut idx = 0usize;
-    let mut stride = 1usize;
-    for axis in fastest_to_slowest.bytes() {
-        let coord = axis_coord(axis, t, c, z);
-        idx += coord * stride;
-        stride *= axis_dim(axis, d);
-    }
-    idx
-}
-
-fn ome_linear_to_coords(
-    mut idx: usize,
-    fastest_to_slowest: &str,
-    d: Dims5,
-) -> (usize, usize, usize) {
-    let mut t = 0usize;
-    let mut c = 0usize;
-    let mut z = 0usize;
-    for axis in fastest_to_slowest.bytes() {
-        let dim = axis_dim(axis, d);
-        let coord = idx % dim;
-        idx /= dim;
-        match axis {
-            b'T' => t = coord,
-            b'C' => c = coord,
-            b'Z' => z = coord,
-            _ => unreachable!(),
-        }
-    }
-    (t, c, z)
-}
-
-fn infer_ome_layout(
-    desc: &str,
-    x: usize,
-    y: usize,
-    pages: usize,
-) -> Result<Option<InferredLayout>, String> {
-    if !desc.contains("<OME") && !desc.contains(":OME") {
-        return Ok(None);
-    }
-    let pixels_tags = xml_start_tags(desc, "Pixels");
-    let Some(pixels) = pixels_tags.first().copied() else {
-        return Ok(None);
-    };
-
-    let sx = parse_usize_attr(pixels, "SizeX")?.ok_or("OME Pixels missing SizeX")?;
-    let sy = parse_usize_attr(pixels, "SizeY")?.ok_or("OME Pixels missing SizeY")?;
-    let z = parse_usize_attr(pixels, "SizeZ")?.ok_or("OME Pixels missing SizeZ")?;
-    let c = parse_usize_attr(pixels, "SizeC")?.ok_or("OME Pixels missing SizeC")?;
-    let t = parse_usize_attr(pixels, "SizeT")?.ok_or("OME Pixels missing SizeT")?;
-    if sx != x || sy != y {
-        return Err(format!(
-            "OME SizeX/SizeY={sx}x{sy}, but TIFF pages are {x}x{y}"
-        ));
-    }
-    if z == 0 || c == 0 || t == 0 {
-        return Err("OME SizeZ/SizeC/SizeT must be positive".into());
-    }
-    let product = z
-        .checked_mul(c)
-        .and_then(|v| v.checked_mul(t))
-        .ok_or("OME T*C*Z overflow")?;
-    if product != pages {
-        return Err(format!(
-            "OME metadata describes T*C*Z={product} planes but this TIFF contains {pages} IFDs; multi-file/partial OME-TIFF datasets are not yet supported by the single-file CLI"
-        ));
-    }
-
-    let dimension_order = xml_attr(pixels, "DimensionOrder")
-        .ok_or("OME Pixels missing DimensionOrder")?
-        .to_ascii_uppercase();
-    if dimension_order.len() != 5 || !dimension_order.starts_with("XY") {
-        return Err(format!("unsupported OME DimensionOrder={dimension_order}; expected XY followed by a permutation of ZCT"));
-    }
-    let fastest_to_slowest = &dimension_order[2..];
-    let mut axes = fastest_to_slowest.as_bytes().to_vec();
-    axes.sort_unstable();
-    if axes.as_slice() != b"CTZ" {
-        return Err(format!("unsupported OME DimensionOrder={dimension_order}"));
-    }
-    let page_order: String = fastest_to_slowest.chars().rev().collect();
-    let dims = Dims5 { x, y, z, c, t };
-
-    let tiffdata_tags = xml_start_tags(desc, "TiffData");
-    let has_explicit = tiffdata_tags.iter().any(|tag| {
-        ["IFD", "FirstZ", "FirstC", "FirstT", "PlaneCount"]
-            .iter()
-            .any(|a| xml_attr(tag, a).is_some())
-    });
-
-    let ifd_coords = if has_explicit {
-        let mut map: Vec<Option<(usize, usize, usize)>> = vec![None; pages];
-        for tag in tiffdata_tags {
-            let ifd = parse_usize_attr(tag, "IFD")?.unwrap_or(0);
-            let first_z = parse_usize_attr(tag, "FirstZ")?.unwrap_or(0);
-            let first_c = parse_usize_attr(tag, "FirstC")?.unwrap_or(0);
-            let first_t = parse_usize_attr(tag, "FirstT")?.unwrap_or(0);
-            let count = match parse_usize_attr(tag, "PlaneCount")? {
-                Some(n) => n,
-                None if xml_attr(tag, "IFD").is_some() => 1,
-                None => pages,
-            };
-            if first_t >= t || first_c >= c || first_z >= z {
-                return Err(
-                    "OME TiffData FirstT/FirstC/FirstZ lies outside Pixels dimensions".into(),
-                );
-            }
-            let start_linear =
-                coords_to_ome_linear(first_t, first_c, first_z, fastest_to_slowest, dims);
-            for j in 0..count {
-                let dst_ifd = ifd.checked_add(j).ok_or("OME TiffData IFD overflow")?;
-                let linear = start_linear
-                    .checked_add(j)
-                    .ok_or("OME TiffData coordinate overflow")?;
-                if dst_ifd >= pages || linear >= product {
-                    return Err(
-                        "OME TiffData mapping exceeds this TIFF or Pixels dimensions".into(),
-                    );
-                }
-                let coord = ome_linear_to_coords(linear, fastest_to_slowest, dims);
-                if map[dst_ifd].replace(coord).is_some() {
-                    return Err(format!("OME TiffData maps IFD {dst_ifd} more than once"));
-                }
-            }
-        }
-        if map.iter().any(Option::is_none) {
-            return Err("OME TiffData mapping does not cover every TIFF IFD".into());
-        }
-        Some(map.into_iter().map(Option::unwrap).collect())
-    } else {
-        None
-    };
-
-    Ok(Some(InferredLayout {
-        t,
-        c,
-        z,
-        page_order,
-        source: if ifd_coords.is_some() {
-            "OME-TIFF (explicit TiffData mapping)".into()
-        } else {
-            "OME-TIFF".into()
-        },
-        ifd_coords,
-    }))
-}
-
 fn imagej_value(desc: &str, key: &str) -> Option<usize> {
     desc.lines().find_map(|line| {
         let line = line.trim();
@@ -568,11 +347,12 @@ fn infer_layout_from_description(
     x: usize,
     y: usize,
     pages: usize,
+    path: &Path,
 ) -> Result<Option<InferredLayout>, String> {
     let Some(desc) = desc else {
         return Ok(None);
     };
-    if let Some(v) = infer_ome_layout(desc, x, y, pages)? {
+    if let Some(v) = infer_ome_layout(desc, x, y, pages, path)? {
         return Ok(Some(v));
     }
     if let Some(v) = infer_imagej_layout(desc, pages)? {
@@ -1146,7 +926,7 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
     let inferred = if ds.ignore_metadata {
         None
     } else {
-        infer_layout_from_description(description.as_deref(), x, y, logical_pages)?
+        infer_layout_from_description(description.as_deref(), x, y, logical_pages, path)?
     };
     let layout = resolve_layout(x, y, logical_pages, ds, inferred)?;
     let d = layout.dims;
@@ -1536,7 +1316,7 @@ fn load_dataset(path: &Path, ds: &DatasetArgs) -> Result<(Vec<u16>, ResolvedLayo
     let inferred = if ds.ignore_metadata {
         None
     } else {
-        infer_layout_from_description(description.as_deref(), x, y, pages)?
+        infer_layout_from_description(description.as_deref(), x, y, pages, path)?
     };
     let layout = resolve_layout(x, y, pages, ds, inferred)?;
     let data = reorder_pages_to_tczyx(raw, &layout);
@@ -2034,7 +1814,9 @@ mod metadata_tests {
     #[test]
     fn parses_ome_dimension_order() {
         let d = r#"<?xml version="1.0"?><OME><Image><Pixels DimensionOrder="XYZTC" SizeX="10" SizeY="7" SizeZ="3" SizeT="2" SizeC="2"><TiffData/></Pixels></Image></OME>"#;
-        let m = infer_ome_layout(d, 10, 7, 12).unwrap().unwrap();
+        let m = infer_ome_layout(d, 10, 7, 12, Path::new("image.ome.tif"))
+            .unwrap()
+            .unwrap();
         assert_eq!((m.t, m.c, m.z), (2, 2, 3));
         assert_eq!(m.page_order, "CTZ");
         assert!(m.ifd_coords.is_none());
@@ -2043,7 +1825,9 @@ mod metadata_tests {
     #[test]
     fn parses_ome_explicit_reverse_time_mapping() {
         let d = r#"<OME><Image><Pixels DimensionOrder="XYZTC" SizeX="10" SizeY="7" SizeZ="1" SizeC="1" SizeT="3"><TiffData IFD="0" FirstT="2"/><TiffData IFD="1" FirstT="1"/><TiffData IFD="2" FirstT="0"/></Pixels></Image></OME>"#;
-        let m = infer_ome_layout(d, 10, 7, 3).unwrap().unwrap();
+        let m = infer_ome_layout(d, 10, 7, 3, Path::new("image.ome.tif"))
+            .unwrap()
+            .unwrap();
         let map = m.ifd_coords.unwrap();
         assert_eq!(map, vec![(2, 0, 0), (1, 0, 0), (0, 0, 0)]);
     }

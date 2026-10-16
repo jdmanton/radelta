@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(radelta_hdf5 VERSION 0.7.7 LANGUAGES C)
+project(radelta_hdf5 VERSION 0.7.8 LANGUAGES C)
 include(CTest)
 find_package(HDF5 1.8.15 REQUIRED COMPONENTS C)
 if(TARGET HDF5::HDF5)

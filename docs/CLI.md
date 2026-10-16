@@ -97,9 +97,34 @@ Radelta uses contiguous `T,C,Z,Y,X` order with X fastest. The CLI normally infer
 
 Supported metadata include:
 
-- single-file OME-TIFF (`SizeT`, `SizeC`, `SizeZ`, `DimensionOrder`, and local `TiffData` mappings);
+- OME-TIFF, including a single member of a multi-file acquisition (`SizeT`, `SizeC`, `SizeZ`, `DimensionOrder`, and local `TiffData` mappings);
 - ImageJ/Fiji hyperstack metadata (`channels`, `slices`, `frames`); and
 - ordinary TIFF stacks, treated as `T=1`, `C=1`, `Z=number_of_pages`.
+
+For an acquisition split across channel or timepoint files, use the usual
+command on each file:
+
+```bash
+radelta encode acquisition_C00.ome.tif acquisition_C00.rdlt --stream --memory-mib 10000
+```
+
+OME dimensions may describe the whole acquisition. Radelta identifies local
+`TiffData` entries by the enclosing OME UUID, or by their `UUID FileName` when
+a root UUID is absent. Entries without a UUID refer to the supplied TIFF.
+The `.rdlt` contains only this file's complete contiguous TCZ subset, with
+local axes starting at zero; the CLI reports its original acquisition ranges.
+For example, one 1599-plane channel from a four-channel acquisition is stored
+as `T=1, C=1, Z=1599`. Sibling pixel files are not opened.
+
+Default decoding restores the original OME-XML, descriptive TIFF tags and IFD
+order, including acquisition coordinates and external file references. Those
+references still describe a multi-file acquisition. To deliberately produce a
+local OME layout, `decode --page-order TCZ` regenerates the description and
+archives the original metadata in the private TIFF tag as described below.
+Missing, duplicate or ambiguous plane mappings, nonrectangular subsets and
+coordinate gaps are rejected; missing planes are never filled with zeros.
+External `BinaryOnly` metadata and multiple OME image series require conversion
+to a single locally described image before encoding.
 
 Manual overrides are available when metadata are absent or incorrect:
 
@@ -157,7 +182,9 @@ but not both. The encoded `q` value must fit in 8 bits.
 
 - Input pages must contain grayscale `uint16` samples.
 - X and Y may be rectangular but must be consistent throughout a dataset.
-- Single-file OME-TIFF is supported; multi-file OME datasets are not assembled automatically.
+- A single member of a multi-file OME-TIFF acquisition is supported when its
+  mapped planes form a complete contiguous TCZ subset. Other files are not
+  assembled automatically.
 - Supported contiguous ImageJ/tifffile hyperstacks must be uncompressed, single-sample, 16-bit contiguous data.
 - Decoding automatically uses BigTIFF when needed.
 
