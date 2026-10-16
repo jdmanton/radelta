@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.1
+
+- **fix:** TIFF pages with several planar (`PlanarConfiguration=2`) samples
+  per pixel were encoded from their first sample only, silently discarding the
+  rest. Each sample plane is now read as a channel, in both in-memory and
+  streaming encoding; a 10-page, 3-sample file becomes `T=1, C=3, Z=10`.
+  tifffile writes such pages for 3- or 4-plane uint16 stacks it treats as
+  RGB/RGBA. Decoding writes single-sample pages in the original plane order;
+- interleaved multi-sample pages are still rejected, now with a message that
+  names the layout; pages with differing `SamplesPerPixel` are rejected;
+- planar multi-sample files that also carry OME or ImageJ dimensional metadata
+  are rejected rather than guessed at; `--ignore-metadata` reads their samples
+  as channels.
+
 ## 0.7.6
 
 - `radelta-hdf5 bdv` exports TIFF stacks or HDF5 datasets to tiled,

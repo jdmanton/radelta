@@ -99,7 +99,31 @@ Supported metadata include:
 
 - OME-TIFF, including a single member of a multi-file acquisition (`SizeT`, `SizeC`, `SizeZ`, `DimensionOrder`, and local `TiffData` mappings);
 - ImageJ/Fiji hyperstack metadata (`channels`, `slices`, `frames`); and
-- ordinary TIFF stacks, treated as `T=1`, `C=1`, `Z=number_of_pages`.
+- ordinary TIFF stacks, treated as `T=1`, `C=1`, `Z=number_of_pages`; and
+- planar multi-sample pages (see below), treated as `T=1`,
+  `C=SamplesPerPixel`, `Z=number_of_pages`.
+
+### Multi-sample pages
+
+A TIFF page can store several values per pixel (`SamplesPerPixel` > 1). In
+planar layout (`PlanarConfiguration=2`) each sample is a complete XY plane, and
+the CLI reads every sample plane as a separate channel. This includes stacks
+that tifffile writes as planar RGB/RGBA pages when the leading array axis has
+length 3 or 4. Every page must have the same number of samples.
+
+Logical planes are numbered page by page, with the sample index varying
+fastest. Without overrides, a 10-page file with 3 samples per page becomes
+`T=1, C=3, Z=10`. `--t`, `--c`, `--z` and `--page-order` apply to those logical
+planes, so `--t 5 --z 2` reads the same file as 5 timepoints of 2 planes with
+3 channels each. Decoding writes one single-sample page per plane in the
+original plane order, with a generated OME description; the source metadata is
+archived in tag 65000.
+
+Interleaved multi-sample pages (`PlanarConfiguration=1`, the usual RGB layout)
+are rejected. A planar multi-sample file that also has OME or ImageJ
+dimensional metadata is rejected because the two descriptions can conflict;
+add `--ignore-metadata` to read its samples as channels, with dimension
+overrides if needed.
 
 For an acquisition split across channel or timepoint files, use the usual
 command on each file:
@@ -180,7 +204,8 @@ but not both. The encoded `q` value must fit in 8 bits.
 
 ## TIFF notes
 
-- Input pages must contain grayscale `uint16` samples.
+- Input pages must contain `uint16` samples: one per pixel, or several in
+  planar layout, which are read as channels.
 - X and Y may be rectangular but must be consistent throughout a dataset.
 - A single member of a multi-file OME-TIFF acquisition is supported when its
   mapped planes form a complete contiguous TCZ subset. Other files are not

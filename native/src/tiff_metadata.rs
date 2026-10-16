@@ -114,6 +114,13 @@ fn resolve_children(
     }
     Ok(())
 }
+/// Serialized size of a tag list, as written by `save_tags`.
+fn saved_len(tags: &[SavedTag]) -> usize {
+    8 + tags
+        .iter()
+        .map(|tag| 20 + tag.bytes.len() + tag.children.iter().map(|c| saved_len(c)).sum::<usize>())
+        .sum::<usize>()
+}
 fn put(out: &mut Vec<u8>, n: usize) {
     out.extend_from_slice(&(n as u64).to_le_bytes());
 }
@@ -166,15 +173,35 @@ pub fn capture(path: &Path, layout: &ResolvedLayout) -> Result<Vec<u8>, String> 
         put(&mut out, (t * d.c + c) * d.z + z);
     }
     let mut all = Vec::new();
+    let mut multisample = false;
     let mut budget = limit - out.len() - 8;
     loop {
+        let samples = page_samples(&mut dec)?;
         let mut tags = read_tags(&mut dec.image_ifd(), true, &mut budget)?;
         resolve_children(&mut dec, &mut tags, 0, &mut budget)?;
+        if samples > 1 {
+            // Each planar sample becomes its own single-sample page. Drop the
+            // tags whose values describe the sample set as a whole.
+            multisample = true;
+            tags.retain(|tag| !matches!(tag.id, 262 | 340 | 341));
+            for _ in 1..samples {
+                let copy_bytes = saved_len(&tags);
+                budget = budget
+                    .checked_sub(copy_bytes)
+                    .ok_or("TIFF metadata exceeds configured byte limit")?;
+                all.push(tags.clone());
+            }
+        }
         all.push(tags);
         if !dec.more_images() {
             break;
         }
         dec.next_image().map_err(|e| e.to_string())?;
+    }
+    if multisample {
+        // Source descriptions refer to multisample pages; decoding writes a
+        // generated description and archives the original metadata instead.
+        out[SIGNATURE.len()] = 0;
     }
     put(&mut out, all.len());
     for tags in &all {

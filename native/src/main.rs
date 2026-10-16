@@ -100,7 +100,7 @@ fn usage() -> ! {
            q         = round(z / noise_step)\n\n\
          Notes:\n  \\
          * X and Y may be rectangular; all pages in one dense TIFF dataset must share X/Y.\n  \\
-         * The CLI currently expects grayscale uint16 pages. Channels may be separate TIFF pages.\n  \\
+         * The CLI expects uint16 pages. Planar multi-sample pages are read as channels; interleaved RGB is rejected.\n  \\
          * Multi-file OME-TIFF datasets are not yet assembled automatically.\n  \\
          * Single volumes use RDL1/RDLQ; multidimensional files use RDM2/RDQ2."
     );
@@ -486,7 +486,143 @@ fn read_imagej_contiguous_u16(
     Ok(out)
 }
 
-type TiffPages = (Vec<u16>, usize, usize, usize, Option<String>);
+/// Number of samples stored for each pixel of the decoder's current page.
+///
+/// Planar (`PlanarConfiguration=2`) multi-sample pages are accepted: each
+/// sample is a complete XY plane and is read as a separate channel.
+/// Interleaved multi-sample pages (RGB and similar) are rejected.
+fn page_samples(dec: &mut Decoder<BufReader<File>>) -> Result<usize, String> {
+    let samples = dec
+        .find_tag_unsigned::<u64>(Tag::SamplesPerPixel)
+        .map_err(|e| e.to_string())?
+        .unwrap_or(1);
+    if samples == 0 {
+        return Err("TIFF page has SamplesPerPixel=0".into());
+    }
+    if samples > 1 {
+        let planar = dec
+            .find_tag_unsigned::<u64>(Tag::PlanarConfiguration)
+            .map_err(|e| e.to_string())?
+            .unwrap_or(1);
+        if planar != 2 {
+            return Err(format!(
+                "TIFF pages interleave {samples} samples per pixel (PlanarConfiguration={planar}); interleaved RGB/multisample pages are not supported by the CLI. Planar (separate) multisample pages are read as channels"
+            ));
+        }
+    }
+    usize::try_from(samples).map_err(|_| "TIFF SamplesPerPixel overflow".into())
+}
+
+/// Read one sample plane of a planar multi-sample TIFF page.
+///
+/// Each sample of a planar page is stored in its own run of strips or tiles,
+/// so only the chunks belonging to `sample` are decoded.
+fn read_sample_plane(
+    dec: &mut Decoder<BufReader<File>>,
+    width: usize,
+    height: usize,
+    sample: usize,
+    samples: usize,
+) -> Result<Vec<u16>, String> {
+    use tiff::decoder::ChunkType;
+    let chunk_type = dec.get_chunk_type();
+    let chunks = match chunk_type {
+        ChunkType::Strip => dec.strip_count(),
+        ChunkType::Tile => dec.tile_count(),
+    }
+    .map_err(|e| e.to_string())? as usize;
+    if chunks == 0 || !chunks.is_multiple_of(samples) || sample >= samples {
+        return Err(format!(
+            "planar TIFF page has {chunks} strips/tiles, which do not divide into {samples} samples"
+        ));
+    }
+    let per_plane = chunks / samples;
+    let (chunk_w, chunk_h) = dec.chunk_dimensions();
+    let (chunk_w, chunk_h) = (chunk_w as usize, chunk_h as usize);
+    if chunk_w == 0 || chunk_h == 0 {
+        return Err("TIFF strip/tile dimensions must be positive".into());
+    }
+    let across = match chunk_type {
+        ChunkType::Strip => 1,
+        ChunkType::Tile => width.div_ceil(chunk_w),
+    };
+    let plane_len = width
+        .checked_mul(height)
+        .ok_or("TIFF plane size overflow")?;
+    let mut plane = vec![0u16; plane_len];
+    for k in 0..per_plane {
+        let index = sample
+            .checked_mul(per_plane)
+            .and_then(|v| v.checked_add(k))
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or("TIFF chunk index overflow")?;
+        let in_plane = u32::try_from(k).map_err(|_| "TIFF chunk index overflow")?;
+        // The geometry of chunk `k` is the same in every sample plane. Take
+        // the visible extent from the first plane's chunk and the decoded
+        // extent from the chunk actually read, which may include padding.
+        let (data_w, data_h) = dec.chunk_data_dimensions(in_plane);
+        let (read_w, read_h) = dec.chunk_data_dimensions(index);
+        let (data_w, data_h) = (data_w as usize, data_h as usize);
+        let (read_w, read_h) = (read_w as usize, read_h as usize);
+        let x0 = (k % across) * chunk_w;
+        let y0 = (k / across) * chunk_h;
+        if read_w < data_w || read_h < data_h || x0 + data_w > width || y0 + data_h > height {
+            return Err("planar TIFF strip/tile geometry does not match the page".into());
+        }
+        match dec.read_chunk(index).map_err(|e| e.to_string())? {
+            DecodingResult::U16(v) => {
+                if v.len() != read_w * read_h {
+                    return Err(format!(
+                        "planar TIFF chunk {index} decoded to {} samples, expected {}",
+                        v.len(),
+                        read_w * read_h
+                    ));
+                }
+                for row in 0..data_h {
+                    let src = row * read_w;
+                    let dst = (y0 + row) * width + x0;
+                    plane[dst..dst + data_w].copy_from_slice(&v[src..src + data_w]);
+                }
+            }
+            _ => return Err("expected uint16 samples in planar multisample TIFF page".into()),
+        }
+    }
+    Ok(plane)
+}
+
+/// Inferred layout when every TIFF page holds `samples` planar samples.
+///
+/// Logical planes are numbered page by page with the sample index varying
+/// fastest; by default the samples become channels and the pages Z planes.
+fn infer_multisample_layout(
+    description: Option<&str>,
+    physical_pages: usize,
+    samples: usize,
+    ds: &DatasetArgs,
+) -> Result<InferredLayout, String> {
+    if !ds.ignore_metadata {
+        if let Some(desc) = description {
+            let imagej = desc
+                .lines()
+                .any(|line| line.trim_start().starts_with("ImageJ="));
+            if imagej || desc.contains("<OME") || desc.contains(":OME") {
+                return Err(format!(
+                    "TIFF pages store {samples} planar samples per pixel and also carry OME/ImageJ dimensional metadata; combining the two is not supported. Use --ignore-metadata to read the samples as channels, with --t/--c/--z/--page-order if needed"
+                ));
+            }
+        }
+    }
+    Ok(InferredLayout {
+        t: 1,
+        c: samples,
+        z: physical_pages,
+        page_order: "TZC".into(),
+        source: format!("planar multisample TIFF ({samples} samples per pixel read as channels)"),
+        ifd_coords: None,
+    })
+}
+
+type TiffPages = (Vec<u16>, usize, usize, usize, usize, Option<String>);
 
 fn read_tiff_pages_u16(path: &Path) -> Result<TiffPages, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
@@ -497,20 +633,23 @@ fn read_tiff_pages_u16(path: &Path) -> Result<TiffPages, String> {
     let mut width = 0usize;
     let mut height = 0usize;
     let mut pages = 0usize;
+    let mut samples = 1usize;
     let mut image_description: Option<String> = None;
 
     loop {
         let (w, h) = dec.dimensions().map_err(|e| e.to_string())?;
+        let page_sample_count = page_samples(&mut dec)?;
         if pages == 0 {
             width = w as usize;
             height = h as usize;
+            samples = page_sample_count;
             image_description = dec.get_tag_ascii_string(Tag::ImageDescription).ok();
 
             // Some ImageJ/tifffile hyperstacks deliberately have a single IFD
             // even though ImageDescription reports many logical images.  When
             // that layout is detected, bypass normal IFD iteration and read the
             // contiguous pixel block directly.
-            if !dec.more_images() {
+            if !dec.more_images() && samples == 1 {
                 if let Some(desc) = image_description.as_deref() {
                     let is_imagej = desc
                         .lines()
@@ -518,7 +657,7 @@ fn read_tiff_pages_u16(path: &Path) -> Result<TiffPages, String> {
                     let logical_pages = imagej_value(desc, "images").unwrap_or(1);
                     if is_imagej && logical_pages > 1 {
                         let v = read_imagej_contiguous_u16(&mut dec, width, height, logical_pages)?;
-                        return Ok((v, width, height, logical_pages, image_description));
+                        return Ok((v, width, height, logical_pages, 1, image_description));
                     }
                 }
             }
@@ -526,6 +665,22 @@ fn read_tiff_pages_u16(path: &Path) -> Result<TiffPages, String> {
             return Err(
                 "all TIFF pages in one dense dataset must have the same X/Y dimensions".into(),
             );
+        } else if page_sample_count != samples {
+            return Err(format!(
+                "all TIFF pages in one dataset must have the same SamplesPerPixel; page 0 has {samples}, page {pages} has {page_sample_count}"
+            ));
+        }
+        if samples > 1 {
+            for sample in 0..samples {
+                let plane = read_sample_plane(&mut dec, width, height, sample, samples)?;
+                data.extend_from_slice(&plane);
+            }
+            pages += 1;
+            if !dec.more_images() {
+                break;
+            }
+            dec.next_image().map_err(|e| e.to_string())?;
+            continue;
         }
         match dec.read_image().map_err(|e| e.to_string())? {
             DecodingResult::U16(v) => {
@@ -549,7 +704,27 @@ fn read_tiff_pages_u16(path: &Path) -> Result<TiffPages, String> {
         dec.next_image().map_err(|e| e.to_string())?;
     }
 
-    Ok((data, width, height, pages, image_description))
+    Ok((data, width, height, pages, samples, image_description))
+}
+
+/// Layout inference shared by in-memory and streaming encoding. `pages` counts
+/// TIFF pages before planar samples are expanded into separate planes.
+fn infer_dataset_layout(
+    description: Option<&str>,
+    x: usize,
+    y: usize,
+    pages: usize,
+    samples: usize,
+    ds: &DatasetArgs,
+    path: &Path,
+) -> Result<Option<InferredLayout>, String> {
+    if samples > 1 {
+        infer_multisample_layout(description, pages, samples, ds).map(Some)
+    } else if ds.ignore_metadata {
+        Ok(None)
+    } else {
+        infer_layout_from_description(description, x, y, pages, path)
+    }
 }
 
 fn resolve_layout(
@@ -695,6 +870,9 @@ struct StreamingDataset {
     canonical_to_source: Vec<usize>,
     physical_pages: usize,
     logical_pages: usize,
+    /// Planar samples per TIFF page; logical plane `p` is sample
+    /// `p % samples` of page `p / samples`.
+    samples: usize,
     description: Option<String>,
 }
 
@@ -704,6 +882,7 @@ enum PlaneReader {
         dec: Decoder<BufReader<File>>,
         width: usize,
         height: usize,
+        samples: usize,
     },
     ImageJContiguous {
         reader: BufReader<File>,
@@ -719,7 +898,7 @@ enum PlaneReader {
 impl PlaneReader {
     fn open(path: &Path, info: &StreamingDataset) -> Result<Self, String> {
         let d = info.layout.dims;
-        if info.physical_pages == 1 && info.logical_pages > 1 {
+        if info.physical_pages == 1 && info.logical_pages > 1 && info.samples == 1 {
             let desc = info.description.as_deref().unwrap_or("");
             let is_imagej = desc
                 .lines()
@@ -807,17 +986,33 @@ impl PlaneReader {
             dec,
             width: d.x,
             height: d.y,
+            samples: info.samples,
         })
     }
 
     #[allow(clippy::chunks_exact_to_as_chunks)]
     fn read_plane(&mut self, source_page: usize) -> Result<Vec<u16>, String> {
         match self {
-            Self::Ifd { dec, width, height } => {
-                dec.seek_to_image(source_page).map_err(|e| e.to_string())?;
+            Self::Ifd {
+                dec,
+                width,
+                height,
+                samples,
+            } => {
+                dec.seek_to_image(source_page / *samples)
+                    .map_err(|e| e.to_string())?;
                 let (w, h) = dec.dimensions().map_err(|e| e.to_string())?;
                 if w as usize != *width || h as usize != *height {
                     return Err("TIFF plane dimensions changed within dataset".into());
+                }
+                if *samples > 1 {
+                    return read_sample_plane(
+                        dec,
+                        *width,
+                        *height,
+                        source_page % *samples,
+                        *samples,
+                    );
                 }
                 match dec.read_image().map_err(|e| e.to_string())? {
                     DecodingResult::U16(v) => {
@@ -881,6 +1076,7 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
     let x = w as usize;
     let y = h as usize;
     let description = dec.get_tag_ascii_string(Tag::ImageDescription).ok();
+    let samples = page_samples(&mut dec)?;
 
     let mut physical_pages = 1usize;
     let scan_start = Instant::now();
@@ -892,6 +1088,12 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
             return Err(
                 "all TIFF pages in one dense dataset must have the same X/Y dimensions".into(),
             );
+        }
+        let page_sample_count = page_samples(&mut dec)?;
+        if page_sample_count != samples {
+            return Err(format!(
+                "all TIFF pages in one dataset must have the same SamplesPerPixel; page 0 has {samples}, page {physical_pages} has {page_sample_count}"
+            ));
         }
         physical_pages += 1;
         if last_scan_report.elapsed().as_secs_f64() >= 2.0 {
@@ -911,8 +1113,10 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
         );
     }
 
-    let mut logical_pages = physical_pages;
-    if physical_pages == 1 {
+    let mut logical_pages = physical_pages
+        .checked_mul(samples)
+        .ok_or("TIFF plane count overflow")?;
+    if physical_pages == 1 && samples == 1 {
         if let Some(desc) = description.as_deref() {
             let is_imagej = desc
                 .lines()
@@ -923,11 +1127,15 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
         }
     }
 
-    let inferred = if ds.ignore_metadata {
-        None
-    } else {
-        infer_layout_from_description(description.as_deref(), x, y, logical_pages, path)?
-    };
+    let inferred = infer_dataset_layout(
+        description.as_deref(),
+        x,
+        y,
+        logical_pages / samples,
+        samples,
+        ds,
+        path,
+    )?;
     let layout = resolve_layout(x, y, logical_pages, ds, inferred)?;
     let d = layout.dims;
 
@@ -965,6 +1173,7 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
         canonical_to_source,
         physical_pages,
         logical_pages,
+        samples,
         description,
     })
 }
@@ -1312,13 +1521,12 @@ fn write_encoded_with_metadata(
 }
 
 fn load_dataset(path: &Path, ds: &DatasetArgs) -> Result<(Vec<u16>, ResolvedLayout), String> {
-    let (raw, x, y, pages, description) = read_tiff_pages_u16(path)?;
-    let inferred = if ds.ignore_metadata {
-        None
-    } else {
-        infer_layout_from_description(description.as_deref(), x, y, pages, path)?
-    };
-    let layout = resolve_layout(x, y, pages, ds, inferred)?;
+    let (raw, x, y, pages, samples, description) = read_tiff_pages_u16(path)?;
+    let inferred = infer_dataset_layout(description.as_deref(), x, y, pages, samples, ds, path)?;
+    let planes = pages
+        .checked_mul(samples)
+        .ok_or("TIFF plane count overflow")?;
+    let layout = resolve_layout(x, y, planes, ds, inferred)?;
     let data = reorder_pages_to_tczyx(raw, &layout);
     Ok((data, layout))
 }
