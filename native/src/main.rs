@@ -1747,7 +1747,10 @@ fn configure_metadata_limit(args: &mut Vec<String>) -> Result<(), String> {
 }
 
 fn tiff_limits() -> tiff::decoder::Limits {
-    let mut limits = tiff::decoder::Limits::default();
+    // The CLI budgets image/chunk allocations separately. The decoder's
+    // 256 MiB output and 128 MiB intermediate defaults reject valid large XY
+    // planes even in streaming mode. Lift those limits, keeping metadata bounded.
+    let mut limits = tiff::decoder::Limits::unlimited();
     limits.ifd_value_size = radelta_native::metadata_limit();
     limits
 }
