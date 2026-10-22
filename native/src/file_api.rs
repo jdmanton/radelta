@@ -14,6 +14,7 @@ use super::{
     STREAM_MAGIC_LOSSY, STREAM_VERSION, VERSION,
 };
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::ffi::CStr;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -71,16 +72,106 @@ struct ChunkSegment {
     len: u64,
 }
 
-struct CachedVolume {
+/// Budget for retaining decoded volumes/chunks across interleaved plane reads.
+/// A single oversized entry is still retained, as in the original reader.
+pub const DEFAULT_FILE_CACHE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_CACHE_ENTRIES: usize = 128;
+
+struct CachedPixels {
     key: usize,
     pixels: Vec<u16>,
 }
 
-struct CachedChunk {
-    key: usize,
-    z0: usize,
-    depth: usize,
-    pixels: Vec<u16>,
+struct PixelCache {
+    entries: VecDeque<CachedPixels>,
+    bytes: usize,
+    limit: usize,
+    last_read: Option<(usize, usize)>,
+    recent_keys: VecDeque<usize>,
+    reuse_detected: bool,
+}
+impl PixelCache {
+    fn new(limit: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            bytes: 0,
+            limit,
+            last_read: None,
+            recent_keys: VecDeque::new(),
+            reuse_detected: false,
+        }
+    }
+    fn note_read(&mut self, key: usize, z: usize) {
+        if !self.reuse_detected {
+            if let Some((previous, previous_z)) = self.last_read {
+                if previous != key {
+                    // Same-Z channel switches are the common Fiji case.
+                    // Revisiting an older key also enables caching for less
+                    // regular browsing, with bounded bookkeeping.
+                    if previous_z == z || self.recent_keys.contains(&key) {
+                        self.reuse_detected = true;
+                        self.recent_keys.clear();
+                    } else {
+                        if self.recent_keys.len() == MAX_CACHE_ENTRIES {
+                            self.recent_keys.pop_front();
+                        }
+                        self.recent_keys.push_back(previous);
+                    }
+                }
+            }
+        }
+        self.last_read = Some((key, z));
+    }
+    fn prepare_read(&mut self, bytes: usize) {
+        // A first sequential pass has no reuse between entries. Preserve the
+        // original single-entry memory footprint until reuse is observed.
+        if !self.reuse_detected {
+            while !self.entries.is_empty() {
+                self.evict_oldest();
+            }
+        }
+        self.prepare(bytes);
+    }
+    fn contains(&self, key: usize) -> bool {
+        self.entries.iter().any(|entry| entry.key == key)
+    }
+    fn evict_oldest(&mut self) {
+        if let Some(entry) = self.entries.pop_back() {
+            self.bytes -= entry.pixels.capacity() * std::mem::size_of::<u16>();
+        }
+    }
+    // Evict before allocating another decoded volume, rather than allowing
+    // old cached data to inflate the decoder's peak working set.
+    fn prepare(&mut self, bytes: usize) {
+        while !self.entries.is_empty()
+            && (self.entries.len() >= MAX_CACHE_ENTRIES
+                || self.bytes.checked_add(bytes).is_none_or(|n| n > self.limit))
+        {
+            self.evict_oldest();
+        }
+    }
+    fn insert(&mut self, key: usize, pixels: Vec<u16>) {
+        let bytes = pixels.capacity() * std::mem::size_of::<u16>();
+        self.prepare(bytes);
+        self.bytes += bytes;
+        self.entries.push_front(CachedPixels { key, pixels });
+    }
+    fn get(&mut self, key: usize) -> Option<&[u16]> {
+        let index = self.entries.iter().position(|entry| entry.key == key)?;
+        if index != 0 {
+            let entry = self.entries.remove(index).unwrap();
+            self.entries.push_front(entry);
+        }
+        Some(&self.entries.front().unwrap().pixels)
+    }
+    fn set_limit(&mut self, bytes: usize) {
+        self.limit = bytes;
+        // Zero restores single-entry behavior. A lone oversized volume/chunk
+        // remains usable without decoding it again for every plane.
+        while self.entries.len() > 1 && self.bytes > self.limit {
+            self.evict_oldest();
+        }
+    }
 }
 
 enum FileBacking {
@@ -92,14 +183,14 @@ enum FileBacking {
     Nd {
         file: File,
         streams: Vec<Segment>,
-        cache: Option<CachedVolume>,
+        cache: PixelCache,
     },
     Stream {
         file: File,
         chunks: Vec<ChunkSegment>,
         chunk_z: usize,
         chunks_per_volume: usize,
-        cache: Option<CachedChunk>,
+        cache: PixelCache,
     },
 }
 
@@ -380,7 +471,7 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
             backing: Mutex::new(FileBacking::Nd {
                 file,
                 streams,
-                cache: None,
+                cache: PixelCache::new(DEFAULT_FILE_CACHE_BYTES),
             }),
         });
     }
@@ -492,7 +583,7 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
                 chunks,
                 chunk_z,
                 chunks_per_volume,
-                cache: None,
+                cache: PixelCache::new(DEFAULT_FILE_CACHE_BYTES),
             }),
         });
     }
@@ -534,6 +625,23 @@ impl RadeltaFileHandle {
             format: self.format,
             flags: self.flags,
         }
+    }
+
+    /// Set the decoded volume/chunk retention budget in bytes. Zero restores
+    /// the original single-entry cache. This does not cap decoder working
+    /// memory: one oversized entry is always allowed, as before.
+    pub fn set_cache_limit(&self, bytes: usize) -> std::result::Result<(), String> {
+        let mut backing = self
+            .backing
+            .lock()
+            .map_err(|_| "Radelta file handle mutex is poisoned")?;
+        match &mut *backing {
+            FileBacking::Nd { cache, .. } | FileBacking::Stream { cache, .. } => {
+                cache.set_limit(bytes)
+            }
+            FileBacking::Single { .. } => (),
+        }
+        Ok(())
     }
 
     pub fn read_plane(
@@ -579,14 +687,19 @@ impl RadeltaFileHandle {
                 cache,
             } => {
                 let key = t * d.c + c;
-                let miss = cache.as_ref().is_none_or(|v| v.key != key);
-                if miss {
+                cache.note_read(key, z);
+                if !cache.contains(key) {
+                    let bytes = plane
+                        .checked_mul(d.z)
+                        .and_then(|n| n.checked_mul(2))
+                        .ok_or("decoded volume size overflow")?;
+                    cache.prepare_read(bytes);
                     let payload = read_payload(file, streams[key])?;
                     let pixels = decompress_u16_expecting(&payload, d.volume_dims())
                         .map_err(|e| format!("RDM2/RDQ2 substream: {e}"))?;
-                    *cache = Some(CachedVolume { key, pixels });
+                    cache.insert(key, pixels);
                 }
-                let pixels = &cache.as_ref().unwrap().pixels;
+                let pixels = cache.get(key).unwrap();
                 let start = z * plane;
                 out[..plane].copy_from_slice(&pixels[start..start + plane]);
             }
@@ -607,9 +720,14 @@ impl RadeltaFileHandle {
                         .position(|ch| ch.t == t && ch.c == c && z >= ch.z0 && z < ch.z0 + ch.depth)
                         .ok_or("could not locate requested streaming Radelta chunk")?;
                 }
-                let miss = cache.as_ref().is_none_or(|v| v.key != key);
-                if miss {
-                    let ch = chunks[key];
+                let ch = chunks[key];
+                cache.note_read(key, z);
+                if !cache.contains(key) {
+                    let bytes = plane
+                        .checked_mul(ch.depth)
+                        .and_then(|n| n.checked_mul(2))
+                        .ok_or("decoded chunk size overflow")?;
+                    cache.prepare_read(bytes);
                     let payload = read_payload(
                         file,
                         Segment {
@@ -624,20 +742,12 @@ impl RadeltaFileHandle {
                     };
                     let pixels = decompress_u16_expecting(&payload, expected)
                         .map_err(|e| format!("RDS3/RQS3 chunk: {e}"))?;
-                    *cache = Some(CachedChunk {
-                        key,
-                        z0: ch.z0,
-                        depth: ch.depth,
-                        pixels,
-                    });
+                    cache.insert(key, pixels);
                 }
-                let cv = cache.as_ref().unwrap();
-                if z < cv.z0 || z >= cv.z0 + cv.depth {
-                    return Err("internal streaming chunk cache mismatch".into());
-                }
-                let local_z = z - cv.z0;
+                let pixels = cache.get(key).unwrap();
+                let local_z = z - ch.z0;
                 let start = local_z * plane;
-                out[..plane].copy_from_slice(&cv.pixels[start..start + plane]);
+                out[..plane].copy_from_slice(&pixels[start..start + plane]);
             }
         }
         Ok(())
@@ -892,6 +1002,30 @@ pub unsafe extern "C" fn radelta_file_get_info(
     }
     *out_info = (*handle).info();
     RADELTA_OK
+}
+
+/// Set the decoded retention budget. Zero selects the original single-entry cache.
+///
+/// # Safety
+/// `handle` must be a live file handle returned by `radelta_file_open`.
+#[no_mangle]
+pub unsafe extern "C" fn radelta_file_set_cache_limit(
+    handle: *const RadeltaFileHandle,
+    max_bytes: u64,
+) -> i32 {
+    if handle.is_null() {
+        return RADELTA_INVALID_ARGUMENT;
+    }
+    let Ok(bytes) = usize::try_from(max_bytes) else {
+        return RADELTA_INVALID_ARGUMENT;
+    };
+    match (&*handle).set_cache_limit(bytes) {
+        Ok(()) => RADELTA_OK,
+        Err(e) => {
+            set_last_error(e);
+            RADELTA_CODEC_ERROR
+        }
+    }
 }
 
 /// Read one TCZ plane from an open Radelta file.
@@ -1181,6 +1315,85 @@ pub unsafe extern "C" fn radelta_writer_set_metadata(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decoded_cache_adapts_to_sequential_and_interleaved_plane_orders() {
+        let mut cache = super::PixelCache::new(1024);
+        cache.note_read(0, 0);
+        cache.prepare_read(4);
+        cache.insert(0, vec![1, 2]);
+        cache.note_read(0, 31);
+        cache.note_read(1, 0);
+        cache.prepare_read(4);
+        cache.insert(1, vec![3, 4]);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(!cache.reuse_detected);
+        // Revisiting an evicted channel at another Z enables reuse too.
+        cache.note_read(0, 1);
+        cache.prepare_read(4);
+        cache.insert(0, vec![1, 2]);
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.reuse_detected);
+
+        let mut cache = super::PixelCache::new(1024);
+        cache.note_read(0, 0);
+        cache.prepare_read(4);
+        cache.insert(0, vec![1, 2]);
+        cache.note_read(1, 0);
+        cache.prepare_read(4);
+        cache.insert(1, vec![3, 4]);
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.reuse_detected);
+    }
+    #[test]
+    fn decoded_cache_evicts_least_recently_used_data_within_budget() {
+        let mut cache = super::PixelCache::new(8);
+        cache.insert(1, vec![11, 12]);
+        cache.insert(2, vec![21, 22]);
+        assert_eq!(cache.get(1).unwrap(), &[11, 12]);
+        cache.prepare(4);
+        cache.insert(3, vec![31, 32]);
+        assert!(cache.contains(1));
+        assert!(!cache.contains(2));
+        assert_eq!(cache.get(3).unwrap(), &[31, 32]);
+        assert_eq!(cache.bytes, 8);
+        cache.set_limit(0);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.contains(3));
+        cache.insert(4, vec![41, 42]);
+        assert!(!cache.contains(3));
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn decoded_cache_accounts_for_capacity_and_allows_one_oversized_entry() {
+        let mut cache = super::PixelCache::new(8);
+        cache.insert(1, vec![1, 2]);
+        let mut pixels = Vec::with_capacity(16);
+        pixels.push(99);
+        let bytes = pixels.capacity() * 2;
+        cache.prepare(bytes);
+        assert!(cache.entries.is_empty());
+        cache.insert(2, pixels);
+        assert_eq!(cache.bytes, bytes);
+        assert_eq!(cache.get(2).unwrap(), &[99]);
+        cache.set_limit(0);
+        assert_eq!(cache.entries.len(), 1);
+        cache.insert(3, vec![3]);
+        assert_eq!(cache.bytes, 2);
+        assert!(!cache.contains(2));
+    }
+
+    #[test]
+    fn decoded_cache_bounds_entry_overhead_even_with_a_large_byte_budget() {
+        let mut cache = super::PixelCache::new(usize::MAX);
+        for key in 0..=super::MAX_CACHE_ENTRIES {
+            cache.insert(key, vec![key as u16]);
+        }
+        assert_eq!(cache.entries.len(), super::MAX_CACHE_ENTRIES);
+        assert!(!cache.contains(0));
+        assert_eq!(cache.bytes, super::MAX_CACHE_ENTRIES * 2);
+    }
+
     use super::*;
 
     #[test]

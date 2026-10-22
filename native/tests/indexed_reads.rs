@@ -71,6 +71,20 @@ fn indexed_containers_read_random_planes_and_reject_incomplete_records() {
                 }
             }
             drop(file);
+            // The zero-budget compatibility mode must also read correctly
+            // while every channel switch evicts the previous decoded entry.
+            let file = RadeltaFileHandle::open(&path).unwrap();
+            file.set_cache_limit(0).unwrap();
+            for z in (0..dims.z).rev() {
+                for c in 0..dims.c {
+                    let mut out = [0u16; 6];
+                    file.read_plane(0, c, z, &mut out).unwrap();
+                    let start = (c * dims.z + z) * 6;
+                    assert_eq!(out, expected[start..start + 6]);
+                }
+            }
+            file.set_cache_limit(1024 * 1024).unwrap();
+            drop(file);
             let mut trailing = bytes.clone();
             trailing.push(0);
             fs::write(&path, trailing).unwrap();

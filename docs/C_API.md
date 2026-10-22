@@ -104,6 +104,18 @@ Flags are bitwise:
 4 streaming
 ```
 
+## Decoded data cache
+
+The native file reader retains recently decoded volumes/chunks in an LRU cache,
+so channel-interleaved reads do not repeatedly decode the same data. It keeps a
+single entry during a first sequential pass and enables multiple entries when
+it detects interleaving or revisiting previously read data. Its default
+decoded-data budget is 256 MiB, with at most 128 entries. Call
+`radelta_file_set_cache_limit(handle, max_bytes)` to change this budget. Zero
+restores the original single-entry cache. One oversized entry is always allowed;
+this is a retention budget, not a cap on the decoder's total working memory.
+Rust callers can use `RadeltaFileHandle::set_cache_limit(bytes)`.
+
 ## Streaming writer
 
 The writer API emits `RDS3` or `RQS3` files without holding the whole dataset in RAM. Planes are supplied sequentially in increasing `T,C,Z` order.

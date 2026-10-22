@@ -37,7 +37,7 @@ pub use ffi::{
     radelta_set_metadata_limit, RADELTA_BUFFER_TOO_SMALL, RADELTA_CODEC_ERROR,
     RADELTA_INVALID_ARGUMENT, RADELTA_OK,
 };
-pub use file_api::{RadeltaFileHandle, RadeltaFileInfo};
+pub use file_api::{RadeltaFileHandle, RadeltaFileInfo, DEFAULT_FILE_CACHE_BYTES};
 
 const MAGIC: &[u8; 4] = b"RDL1";
 const MAGIC_LOSSY: &[u8; 4] = b"RDLQ";

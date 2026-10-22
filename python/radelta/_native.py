@@ -47,6 +47,7 @@ def library():
         "radelta_set_metadata": ([U8, ct.c_size_t, U8, ct.c_size_t, U8, ct.c_size_t, SIZE], ct.c_int32),
         "radelta_file_open": ([ct.c_char_p, ct.POINTER(HANDLE)], ct.c_int32),
         "radelta_file_close": ([HANDLE], None),
+        "radelta_file_set_cache_limit": ([HANDLE, ct.c_uint64], ct.c_int32),
         "radelta_file_get_info": ([HANDLE, ct.POINTER(FileInfo)], ct.c_int32),
         "radelta_file_read_plane_u16": ([HANDLE, *([ct.c_uint32]*3), U16, ct.c_uint64], ct.c_int32),
         "radelta_file_get_metadata": ([HANDLE, U8, ct.c_size_t, SIZE], ct.c_int32),

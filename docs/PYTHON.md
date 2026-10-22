@@ -87,8 +87,15 @@ with radelta.open("image.rdlt") as dataset:
 supports integers, slices, negative indices/steps and one ellipsis; it does not
 support NumPy fancy/boolean indexing or insertion of new axes. It decodes full
 XY planes from the native cache, or intersecting HDF5 chunks, and allocates the
-requested output region. For `.rdlt` files the cache holds a decoded Z chunk,
-so access is bounded by the stored chunk size rather than total file size.
+requested output region. For `.rdlt` files, recently decoded volumes or Z chunks
+are retained in a 256 MiB LRU cache by default, so alternating channels can reuse
+their decoded data. Multiple entries are retained only after interleaving or
+revisiting data is detected; a first sequential pass keeps one entry.
+`open` and `read` accept `cache_mib` to override this budget;
+zero restores single-entry caching. Up to 128 entries are retained. One decoded
+volume/chunk larger than the budget is still allowed, as in the original reader.
+This setting controls retained data, not total decoder working memory, and does
+not apply to HDF5 files.
 Use the context manager to release file handles. `dataset.metadata` returns the
 user's opaque metadata bytes.
 

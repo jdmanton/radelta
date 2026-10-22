@@ -38,14 +38,20 @@ class Dataset:
     planes (or intersecting HDF5 chunks), and allocates only the selected output.
     Concurrent reads on this object are serialised around its native cache.
     """
-    def __init__(self, path, *, dataset="/images"):
+    def __init__(self, path, *, dataset="/images", cache_mib=None):
         self._handle = HANDLE()
         self._h5 = None
         self._lock = threading.RLock()
         self.closed = True
         self.path = Path(path)
         try:
+            if cache_mib is not None:
+                cache_mib = operator.index(cache_mib)
+                if not 0 <= cache_mib <= ct.c_size_t(-1).value // (1024 * 1024):
+                    raise ValueError("cache_mib must be a non-negative platform-sized MiB count")
             if self.path.suffix.lower() in (".h5", ".hdf5", ".he5"):
+                if cache_mib is not None:
+                    raise ValueError("cache_mib applies only to Radelta files")
                 h5py, _ = _hdf5()
                 self._h5 = h5py.File(self.path, "r")
                 self._data = self._h5[dataset]
@@ -66,6 +72,8 @@ class Dataset:
             else:
                 dll = library()
                 check_file(dll.radelta_file_open(_path_bytes(self.path), ct.byref(self._handle)))
+                if cache_mib is not None:
+                    check_file(dll.radelta_file_set_cache_limit(self._handle, cache_mib * 1024 * 1024))
                 info = FileInfo()
                 check_file(dll.radelta_file_get_info(self._handle, ct.byref(info)))
                 self._dims = (info.t, info.c, info.z, info.y, info.x)
@@ -169,14 +177,18 @@ class Dataset:
             self.close()
 
 
-def open(path, *, dataset="/images"):
-    """Open a .rdlt or HDF5 file for lazy integer/slice access."""
-    return Dataset(path, dataset=dataset)
+def open(path, *, dataset="/images", cache_mib=None):
+    """Open a file for lazy reads. Radelta retains up to 256 MiB of decoded
+    volumes/chunks by default; cache_mib overrides that budget, and zero selects
+    the original single-entry cache. One oversized entry is always allowed.
+    This is a retention budget, not a limit on decoder working memory.
+    """
+    return Dataset(path, dataset=dataset, cache_mib=cache_mib)
 
 
-def read(path, *, dataset="/images", max_output_bytes=None):
+def read(path, *, dataset="/images", max_output_bytes=None, cache_mib=None):
     """Load a complete file array; use open() to read selected regions instead."""
-    with open(path, dataset=dataset) as source:
+    with open(path, dataset=dataset, cache_mib=cache_mib) as source:
         check_output_size(source.shape, max_output_bytes)
         return source[...]
 

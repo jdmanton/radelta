@@ -125,6 +125,19 @@ class ArrayTests(unittest.TestCase):
 
 
 class FileTests(unittest.TestCase):
+    def test_interleaved_channel_reads_with_default_and_explicit_cache_budgets(self):
+        image = np.arange(3 * 4 * 7 * 9, dtype=np.uint16).reshape(3, 4, 7, 9)
+        path = self.root / "channels.rdlt"
+        radelta.write(path, image, axes="czyx", memory_mib=1)
+        for budget in (None, 0, 1):
+            with radelta.open(path, cache_mib=budget) as source:
+                for z, c in itertools.product(range(4), range(3)):
+                    np.testing.assert_array_equal(source[c, z], image[c, z])
+            np.testing.assert_array_equal(radelta.read(path, cache_mib=budget), image)
+        for budget, error in ((-1, ValueError), (1.5, TypeError), (2**128, ValueError)):
+            with self.assertRaises(error):
+                radelta.open(path, cache_mib=budget)
+
     def test_xy_slices_and_full_planes_match_numpy(self):
         image = np.arange(3 * 7 * 9, dtype=np.uint16).reshape(3, 7, 9)
         path = self.root / "slices.rdlt"
