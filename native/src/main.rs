@@ -1,4 +1,5 @@
 mod ome;
+mod tiff_io;
 mod tiff_metadata;
 use ome::infer_ome_layout;
 use radelta_native::{
@@ -9,7 +10,7 @@ use radelta_native::{
 };
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Instant;
 use tiff::decoder::{Decoder, DecodingResult};
@@ -361,7 +362,6 @@ fn infer_layout_from_description(
     Ok(None)
 }
 
-#[allow(clippy::chunks_exact_to_as_chunks)]
 fn read_imagej_contiguous_u16(
     dec: &mut Decoder<BufReader<File>>,
     width: usize,
@@ -462,27 +462,8 @@ fn read_imagej_contiguous_u16(
         .seek(SeekFrom::Start(data_offset))
         .map_err(|e| e.to_string())?;
 
-    let mut out = Vec::<u16>::with_capacity(total_samples);
-    // Keep temporary memory bounded even for very large camera frames.
-    let mut buf = vec![0u8; 8 * 1024 * 1024];
-    let mut remaining = total_bytes;
-    while remaining != 0 {
-        let take = remaining.min(buf.len());
-        // total_bytes and buf.len() are even, so every chunk contains complete u16s.
-        reader
-            .read_exact(&mut buf[..take])
-            .map_err(|e| e.to_string())?;
-        for b in buf[..take].chunks_exact(2) {
-            let pair = [b[0], b[1]];
-            let value = match byte_order {
-                tiff::tags::ByteOrder::LittleEndian => u16::from_le_bytes(pair),
-                tiff::tags::ByteOrder::BigEndian => u16::from_be_bytes(pair),
-            };
-            out.push(value);
-        }
-        remaining -= take;
-    }
-    debug_assert_eq!(out.len(), total_samples);
+    let mut out = vec![0u16; total_samples];
+    tiff_io::read_u16(reader, &mut out, byte_order)?;
     Ok(out)
 }
 
@@ -682,21 +663,12 @@ fn read_tiff_pages_u16(path: &Path) -> Result<TiffPages, String> {
             dec.next_image().map_err(|e| e.to_string())?;
             continue;
         }
-        match dec.read_image().map_err(|e| e.to_string())? {
-            DecodingResult::U16(v) => {
-                let expected = width
-                    .checked_mul(height)
-                    .ok_or("TIFF plane size overflow")?;
-                if v.len() != expected {
-                    return Err(format!(
-                        "expected a grayscale uint16 TIFF page with {expected} samples, got {}; interleaved RGB/multisample TIFF pages are not yet supported by the CLI",
-                        v.len()
-                    ));
-                }
-                data.extend_from_slice(&v);
-            }
-            other => return Err(format!("expected uint16 grayscale TIFF, got {other:?}")),
-        }
+        let expected = width
+            .checked_mul(height)
+            .ok_or("TIFF plane size overflow")?;
+        let start = data.len();
+        data.resize(start.checked_add(expected).ok_or("TIFF size overflow")?, 0);
+        tiff_io::read_plane(&mut dec, &mut data[start..])?;
         pages += 1;
         if !dec.more_images() {
             break;
@@ -891,7 +863,6 @@ enum PlaneReader {
         plane_samples: usize,
         plane_bytes: usize,
         logical_pages: usize,
-        byte_buf: Vec<u8>,
     },
 }
 
@@ -973,7 +944,6 @@ impl PlaneReader {
                     plane_samples,
                     plane_bytes,
                     logical_pages: info.logical_pages,
-                    byte_buf: vec![0u8; plane_bytes],
                 });
             }
         }
@@ -990,8 +960,7 @@ impl PlaneReader {
         })
     }
 
-    #[allow(clippy::chunks_exact_to_as_chunks)]
-    fn read_plane(&mut self, source_page: usize) -> Result<Vec<u16>, String> {
+    fn read_plane_into(&mut self, source_page: usize, out: &mut [u16]) -> Result<(), String> {
         match self {
             Self::Ifd {
                 dec,
@@ -1006,29 +975,12 @@ impl PlaneReader {
                     return Err("TIFF plane dimensions changed within dataset".into());
                 }
                 if *samples > 1 {
-                    return read_sample_plane(
-                        dec,
-                        *width,
-                        *height,
-                        source_page % *samples,
-                        *samples,
-                    );
+                    let plane =
+                        read_sample_plane(dec, *width, *height, source_page % *samples, *samples)?;
+                    out.copy_from_slice(&plane);
+                    return Ok(());
                 }
-                match dec.read_image().map_err(|e| e.to_string())? {
-                    DecodingResult::U16(v) => {
-                        let expected = width
-                            .checked_mul(*height)
-                            .ok_or("TIFF plane size overflow")?;
-                        if v.len() != expected {
-                            return Err(format!(
-                                "expected {expected} uint16 samples, got {}",
-                                v.len()
-                            ));
-                        }
-                        Ok(v)
-                    }
-                    other => Err(format!("expected uint16 grayscale TIFF, got {other:?}")),
-                }
+                tiff_io::read_plane(dec, out)
             }
             Self::ImageJContiguous {
                 reader,
@@ -1037,7 +989,6 @@ impl PlaneReader {
                 plane_samples,
                 plane_bytes,
                 logical_pages,
-                byte_buf,
             } => {
                 if source_page >= *logical_pages {
                     return Err(format!("logical page {source_page} is out of range"));
@@ -1052,16 +1003,10 @@ impl PlaneReader {
                 reader
                     .seek(SeekFrom::Start(offset))
                     .map_err(|e| e.to_string())?;
-                reader.read_exact(byte_buf).map_err(|e| e.to_string())?;
-                let mut out = Vec::with_capacity(*plane_samples);
-                for b in byte_buf.chunks_exact(2) {
-                    let pair = [b[0], b[1]];
-                    out.push(match *byte_order {
-                        tiff::tags::ByteOrder::LittleEndian => u16::from_le_bytes(pair),
-                        tiff::tags::ByteOrder::BigEndian => u16::from_be_bytes(pair),
-                    });
+                if out.len() != *plane_samples {
+                    return Err("TIFF plane size mismatch".into());
                 }
-                Ok(out)
+                tiff_io::read_u16(reader, out, *byte_order)
             }
         }
     }
@@ -1264,8 +1209,9 @@ fn encode_streaming_lossless(
                 for z in z0..z0 + depth {
                     let canon = (t * d.c + c) * d.z + z;
                     let src = info.canonical_to_source[canon];
-                    let plane = planes.read_plane(src)?;
-                    chunk.extend_from_slice(&plane);
+                    let start = chunk.len();
+                    chunk.resize(start + plane_samples, 0);
+                    planes.read_plane_into(src, &mut chunk[start..])?;
                 }
                 let cd = Dims {
                     x: d.x,
@@ -1390,8 +1336,9 @@ fn encode_streaming_lossy(
                 for z in z0..z0 + depth {
                     let canon = (t * d.c + c) * d.z + z;
                     let src = info.canonical_to_source[canon];
-                    let plane = planes.read_plane(src)?;
-                    chunk.extend_from_slice(&plane);
+                    let start = chunk.len();
+                    chunk.resize(start + plane_samples, 0);
+                    planes.read_plane_into(src, &mut chunk[start..])?;
                 }
                 let cd = Dims {
                     x: d.x,

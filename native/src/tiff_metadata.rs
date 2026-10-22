@@ -37,14 +37,16 @@ fn read_tags(
     let mut tags = Vec::new();
     // Inspect entries without interpreting values as strings (vendor ASCII
     // fields sometimes contain arbitrary bytes). No pixel strips are read.
-    for id in 0..=u16::MAX {
-        if image && structural(id) {
-            continue;
-        }
-        let tag = Tag::from_u16_exhaustive(id);
-        let Some(entry) = ifd.find_entry(tag) else {
-            continue;
-        };
+    // Enumerate the actual raw entries, including private tags, without
+    // decoding structural pixel tags or interpreting arbitrary vendor ASCII.
+    let entries: Vec<_> = ifd
+        .directory()
+        .iter()
+        .filter(|(tag, _)| !image || !structural(tag.to_u16()))
+        .map(|(tag, entry)| (tag, entry.clone()))
+        .collect();
+    for (tag, entry) in entries {
+        let id = tag.to_u16();
         let ty = entry.field_type();
         let width = match ty.to_u16() {
             1 | 2 | 6 | 7 => 1,
@@ -435,7 +437,8 @@ pub fn write(
         .checked_mul(2)
         .and_then(|v| v.checked_add(metadata.len() as u64))
         .ok_or("TIFF size overflow")?;
-    let mut writer = BufWriter::new(File::create(path).map_err(|e| e.to_string())?);
+    let mut writer =
+        BufWriter::with_capacity(1024 * 1024, File::create(path).map_err(|e| e.to_string())?);
     if size > (u32::MAX as u64) - 64 * 1024 * 1024 {
         let mut enc =
             TiffEncoder::<_, TiffKindBig>::new_big(&mut writer).map_err(|e| e.to_string())?;
@@ -521,6 +524,11 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
         };
         let mut image = enc
             .new_image::<colortype::Gray16>(d.x as u32, d.y as u32)
+            .map_err(|e| e.to_string())?;
+        // Output is uncompressed and already held in a plane buffer. One
+        // strip per plane avoids repeated strip dispatch and offset tables.
+        image
+            .rows_per_strip(d.y as u32)
             .map_err(|e| e.to_string())?;
         for tag in &tags {
             if !structural(tag.id) && (tag.id != 270 || preserve) {
