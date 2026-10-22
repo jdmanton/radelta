@@ -1017,8 +1017,17 @@ fn q_context(
     compact_context(mode, l, u, pz)
 }
 
+// Dispatch once per block, never once per voxel. Default kernels expose the
+// mean context and ten-bit rANS precision as compile-time constants; the
+// general kernels retain every other supported context/precision combination.
+macro_rules! default_kernel {
+    ($default:expr, $kernel:ident($($args:expr),* $(,)?)) => {
+        if $default { $kernel::<true>($($args),*) } else { $kernel::<false>($($args),*) }
+    };
+}
+
 #[inline(always)]
-fn rans_encode_symbol(
+fn rans_encode_symbol<const DEFAULT: bool>(
     state: &mut u32,
     out: &mut Vec<u8>,
     model: &StaticModel,
@@ -1026,7 +1035,22 @@ fn rans_encode_symbol(
     sym: usize,
 ) -> Result<()> {
     let symbol = model.encode_symbol(ctx, sym)?;
-    let scale_bits = model.scale_bits as u32;
+    rans_encode_prepared::<DEFAULT>(state, out, symbol, model.scale_bits);
+    Ok(())
+}
+
+#[inline(always)]
+fn rans_encode_prepared<const DEFAULT: bool>(
+    state: &mut u32,
+    out: &mut Vec<u8>,
+    symbol: &EncodeSymbol,
+    scale_bits: u8,
+) {
+    let scale_bits = if DEFAULT {
+        DEFAULT_SCALE_BITS as u32
+    } else {
+        scale_bits as u32
+    };
     let mut x = *state;
     while x >= symbol.renorm_threshold {
         out.push(x as u8);
@@ -1037,7 +1061,28 @@ fn rans_encode_symbol(
     // error is less than 1/freq. The quotient is exact, including freq == 1.
     let quotient = ((x as u64 * symbol.reciprocal) >> (32 + scale_bits)) as u32;
     *state = x + quotient * symbol.complement as u32 + symbol.cum as u32;
-    Ok(())
+}
+
+// A group of four zero symbols has mean context zero when all its causal
+// neighbors are zero. Callers exclude the special first row/column.
+#[inline(always)]
+fn zero_q_neighborhood(q: &[u8], i: usize, width: usize, plane: usize, local_z: usize) -> bool {
+    q[i..i + 4] == [0; 4]
+        && q[i - 1] == 0
+        && q[i - width..i - width + 4] == [0; 4]
+        && (local_z == 0 || q[i - plane..i - plane + 4] == [0; 4])
+}
+
+#[inline(always)]
+fn renormalize_q(mut x: u32, bytes: &[u8], pos: &mut usize) -> Result<u32> {
+    while x < RANS_L {
+        if *pos == 0 {
+            return Err(RadeltaError("truncated q rANS byte stack".into()));
+        }
+        *pos -= 1;
+        x = (x << 8) | bytes[*pos] as u32;
+    }
+    Ok(x)
 }
 
 // Packed decode tables shared by the lossless and lossy decoders. At every supported
@@ -1097,7 +1142,7 @@ fn packed_r_decode_table(model: &StaticModel) -> Result<Vec<u32>> {
 }
 
 #[inline(always)]
-fn rans_decode_packed_q(
+fn rans_decode_packed_q<const DEFAULT: bool>(
     state: &mut u32,
     bytes: &[u8],
     pos: &mut usize,
@@ -1106,6 +1151,16 @@ fn rans_decode_packed_q(
     scale_bits: u8,
     ctx: usize,
 ) -> Result<usize> {
+    let scale_bits = if DEFAULT {
+        DEFAULT_SCALE_BITS
+    } else {
+        scale_bits
+    };
+    let total = if DEFAULT {
+        1 << DEFAULT_SCALE_BITS
+    } else {
+        total
+    };
     let mask = (1u32 << scale_bits) - 1;
     let slot = (*state & mask) as usize;
     let entry = table[ctx * total + slot];
@@ -1115,20 +1170,13 @@ fn rans_decode_packed_q(
     let sym = (entry & 0xff) as usize;
     let freq = (entry >> 8) & 0xfff;
     let cum = (entry >> 20) & 0x7ff;
-    let mut x = freq * (*state >> scale_bits) + (slot as u32 - cum);
-    while x < RANS_L {
-        if *pos == 0 {
-            return Err(RadeltaError("truncated q rANS byte stack".into()));
-        }
-        *pos -= 1;
-        x = (x << 8) | bytes[*pos] as u32;
-    }
-    *state = x;
+    let x = freq * (*state >> scale_bits) + (slot as u32 - cum);
+    *state = renormalize_q(x, bytes, pos)?;
     Ok(sym)
 }
 
 #[inline(always)]
-fn rans_decode_packed_r(
+fn rans_decode_packed_r<const DEFAULT: bool>(
     state: &mut u32,
     bytes: &[u8],
     pos: &mut usize,
@@ -1137,6 +1185,16 @@ fn rans_decode_packed_r(
     scale_bits: u8,
     ctx: usize,
 ) -> Result<usize> {
+    let scale_bits = if DEFAULT {
+        DEFAULT_SCALE_BITS
+    } else {
+        scale_bits
+    };
+    let total = if DEFAULT {
+        1 << DEFAULT_SCALE_BITS
+    } else {
+        total
+    };
     let mask = (1u32 << scale_bits) - 1;
     let slot = (*state & mask) as usize;
     let entry = table[ctx * total + slot];
@@ -1160,7 +1218,7 @@ fn rans_decode_packed_r(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn decode_q_packed_one(
+fn decode_q_packed_one<const DEFAULT: bool>(
     out: &mut [u16],
     i: usize,
     lz: usize,
@@ -1178,6 +1236,7 @@ fn decode_q_packed_one(
     total: usize,
     scale_bits: u8,
 ) -> Result<()> {
+    let mode = if DEFAULT { ContextMode::Mean } else { mode };
     let ctx = if x == 0 {
         compact_count + q_alphabet
     } else {
@@ -1194,7 +1253,7 @@ fn decode_q_packed_one(
             compact_context(mode, l, u, z)
         }
     };
-    let sym = rans_decode_packed_q(state, bytes, pos, table, total, scale_bits, ctx)?;
+    let sym = rans_decode_packed_q::<DEFAULT>(state, bytes, pos, table, total, scale_bits, ctx)?;
     if sym >= q_alphabet {
         return Err(RadeltaError("decoded packed q symbol out of range".into()));
     }
@@ -1203,7 +1262,7 @@ fn decode_q_packed_one(
 }
 
 #[inline(always)]
-fn decode_r_packed_one(
+fn decode_r_packed_one<const DEFAULT: bool>(
     value: &mut u16,
     state: &mut u32,
     bytes: &[u8],
@@ -1212,6 +1271,11 @@ fn decode_r_packed_one(
     total: usize,
     scale_bits: u8,
 ) -> Result<()> {
+    let total = if DEFAULT {
+        1 << DEFAULT_SCALE_BITS
+    } else {
+        total
+    };
     let qs = *value as usize;
     // q=0 implies the sole remainder r=0. Its full-frequency rANS symbol
     // leaves the lane untouched; verify the table is that identity model
@@ -1219,7 +1283,7 @@ fn decode_r_packed_one(
     if qs == 0 && *state >= RANS_L && table[0] == (total as u32) << 9 {
         return Ok(());
     }
-    let r = rans_decode_packed_r(state, bytes, pos, table, total, scale_bits, qs)?;
+    let r = rans_decode_packed_r::<DEFAULT>(state, bytes, pos, table, total, scale_bits, qs)?;
     let qq = qs as u32;
     let reconstructed = qq * qq + r as u32;
     if reconstructed > u16::MAX as u32 {
@@ -1241,7 +1305,7 @@ fn block_specs(z: usize, block_depth: usize) -> Vec<BlockSpec> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn accumulate_block_counts(
+fn accumulate_block_counts<const DEFAULT: bool>(
     acc: &mut Counts,
     input: &[u16],
     q: &[u8],
@@ -1251,28 +1315,56 @@ fn accumulate_block_counts(
     q_alphabet: usize,
     r_alphabet: usize,
 ) {
+    let mode = if DEFAULT { ContextMode::Mean } else { mode };
     let plane = dims.x * dims.y;
     for lz in 0..block.depth {
         let gz = block.z0 + lz;
         let zbase = gz * plane;
         for y in 0..dims.y {
             let row = zbase + y * dims.x;
-            for x in 0..dims.x {
-                let idx = row + x;
-                let qs = q[idx] as usize;
-                let ctx = q_context(q, dims, block.z0, lz, y, x, mode, q_alphabet);
-                acc.q[ctx * q_alphabet + qs] += 1;
+            macro_rules! accumulate_one {
+                ($x:expr) => {{
+                    let x = $x;
+                    let idx = row + x;
+                    let qs = q[idx] as usize;
+                    let ctx = q_context(q, dims, block.z0, lz, y, x, mode, q_alphabet);
+                    acc.q[ctx * q_alphabet + qs] += 1;
 
-                let qq = qs as u16;
-                let r = input[idx] - qq * qq;
-                acc.r[qs * r_alphabet + r as usize] += 1;
+                    let qq = qs as u16;
+                    let r = input[idx] - qq * qq;
+                    acc.r[qs * r_alphabet + r as usize] += 1;
+                }};
+            }
+            if DEFAULT {
+                accumulate_one!(0);
+                let mut x = 1;
+                while x + 4 <= dims.x {
+                    if y > 0 && zero_q_neighborhood(q, row + x, dims.x, plane, lz) {
+                        acc.q[0] += 4;
+                        acc.r[0] += 4;
+                    } else {
+                        accumulate_one!(x);
+                        accumulate_one!(x + 1);
+                        accumulate_one!(x + 2);
+                        accumulate_one!(x + 3);
+                    }
+                    x += 4;
+                }
+                while x < dims.x {
+                    accumulate_one!(x);
+                    x += 1;
+                }
+            } else {
+                for x in 0..dims.x {
+                    accumulate_one!(x);
+                }
             }
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_block(
+fn encode_block<const DEFAULT: bool>(
     input: &[u16],
     q: &[u8],
     dims: Dims,
@@ -1282,6 +1374,7 @@ fn encode_block(
     q_model: &StaticModel,
     r_model: &StaticModel,
 ) -> Result<EncodedBlock> {
+    let mode = if DEFAULT { ContextMode::Mean } else { mode };
     let plane = dims.x * dims.y;
     let block_voxels = block.depth * plane;
     let mut q_states = [RANS_L; LANES];
@@ -1289,25 +1382,95 @@ fn encode_block(
     let mut q_bytes = Vec::with_capacity(block_voxels / 8 + 1024);
     let mut r_bytes = Vec::with_capacity(block_voxels / 8 + 1024);
 
+    let zero_symbol = q_model.encode.first().filter(|s| s.renorm_threshold != 0);
+
     for lz in (0..block.depth).rev() {
         let gz = block.z0 + lz;
         let zbase = gz * plane;
         for y in (0..dims.y).rev() {
             let row = zbase + y * dims.x;
-            for x in (0..dims.x).rev() {
-                let local_i = lz * plane + y * dims.x + x;
-                let lane = local_i & (LANES - 1);
-                let idx = row + x;
-                let qs = q[idx] as usize;
-                let qctx = q_context(q, dims, block.z0, lz, y, x, mode, q_alphabet);
-                rans_encode_symbol(&mut q_states[lane], &mut q_bytes, q_model, qctx, qs)?;
+            macro_rules! encode_one {
+                ($x:expr, $lane:expr) => {{
+                    let x = $x;
+                    let lane = $lane;
+                    let idx = row + x;
+                    let qs = q[idx] as usize;
+                    let qctx = q_context(q, dims, block.z0, lz, y, x, mode, q_alphabet);
+                    rans_encode_symbol::<DEFAULT>(
+                        &mut q_states[lane],
+                        &mut q_bytes,
+                        q_model,
+                        qctx,
+                        qs,
+                    )?;
 
-                // Zero-valued pixels carry no remainder information. Omitting
-                // this identity operation preserves lane order and byte output.
-                if qs != 0 {
-                    let qq = qs as u16;
-                    let r = (input[idx] - qq * qq) as usize;
-                    rans_encode_symbol(&mut r_states[lane], &mut r_bytes, r_model, qs, r)?;
+                    // Zero-valued pixels carry no remainder information. Omitting
+                    // this identity operation preserves lane order and byte output.
+                    if qs != 0 {
+                        let qq = qs as u16;
+                        let r = (input[idx] - qq * qq) as usize;
+                        rans_encode_symbol::<DEFAULT>(
+                            &mut r_states[lane],
+                            &mut r_bytes,
+                            r_model,
+                            qs,
+                            r,
+                        )?;
+                    }
+                }};
+            }
+            if DEFAULT {
+                // Preserve reverse symbol/byte-stack order while making the
+                // four independent rANS state lanes explicit to the compiler.
+                let local_row = lz * plane + y * dims.x;
+                let mut x = dims.x;
+                while x > 0 && ((local_row + x - 1) & 3) != 3 {
+                    x -= 1;
+                    encode_one!(x, (local_row + x) & 3);
+                }
+                while x >= 4 {
+                    x -= 4;
+                    if let Some(symbol) = zero_symbol {
+                        if x > 0 && y > 0 && zero_q_neighborhood(q, row + x, dims.x, plane, lz) {
+                            rans_encode_prepared::<true>(
+                                &mut q_states[3],
+                                &mut q_bytes,
+                                symbol,
+                                DEFAULT_SCALE_BITS,
+                            );
+                            rans_encode_prepared::<true>(
+                                &mut q_states[2],
+                                &mut q_bytes,
+                                symbol,
+                                DEFAULT_SCALE_BITS,
+                            );
+                            rans_encode_prepared::<true>(
+                                &mut q_states[1],
+                                &mut q_bytes,
+                                symbol,
+                                DEFAULT_SCALE_BITS,
+                            );
+                            rans_encode_prepared::<true>(
+                                &mut q_states[0],
+                                &mut q_bytes,
+                                symbol,
+                                DEFAULT_SCALE_BITS,
+                            );
+                            continue;
+                        }
+                    }
+                    encode_one!(x + 3, 3);
+                    encode_one!(x + 2, 2);
+                    encode_one!(x + 1, 1);
+                    encode_one!(x, 0);
+                }
+                while x > 0 {
+                    x -= 1;
+                    encode_one!(x, (local_row + x) & 3);
+                }
+            } else {
+                for x in (0..dims.x).rev() {
+                    encode_one!(x, (lz * plane + y * dims.x + x) & (LANES - 1));
                 }
             }
         }
@@ -1330,7 +1493,7 @@ struct PackedDecodeTables<'a> {
     scale_bits: u8,
 }
 
-fn decode_q_block_into_packed(
+fn decode_q_block_into_packed<const DEFAULT: bool>(
     block: &BorrowedEncodedBlock<'_>,
     dims: Dims,
     mode: ContextMode,
@@ -1338,6 +1501,7 @@ fn decode_q_block_into_packed(
     tables: &PackedDecodeTables<'_>,
     out: &mut [u16],
 ) -> Result<()> {
+    let mode = if DEFAULT { ContextMode::Mean } else { mode };
     let plane = dims.x * dims.y;
     let n = block.depth * plane;
     if out.len() != n {
@@ -1349,6 +1513,16 @@ fn decode_q_block_into_packed(
     let mut q_states = block.q_states;
     let mut q_pos = block.q_bytes.len();
     let compact_count = mode.compact_count(q_alphabet);
+    let zero_freq = if DEFAULT {
+        let entry = tables.q[0];
+        if entry & 0xff == 0 {
+            (entry >> 8) & 0xfff
+        } else {
+            0
+        }
+    } else {
+        0
+    };
 
     // Align each row to lane 0, then decode groups of four with explicit lane
     // states. Contexts remain strictly causal because symbols are still decoded
@@ -1360,7 +1534,7 @@ fn decode_q_block_into_packed(
             while x < dims.x && ((row0 + x) & 3) != 0 {
                 let i = row0 + x;
                 let lane = i & 3;
-                decode_q_packed_one(
+                decode_q_packed_one::<DEFAULT>(
                     out,
                     i,
                     lz,
@@ -1382,7 +1556,29 @@ fn decode_q_block_into_packed(
             }
             while x + 4 <= dims.x {
                 let i = row0 + x;
-                decode_q_packed_one(
+                if DEFAULT
+                    && zero_freq != 0
+                    && x > 0
+                    && y > 0
+                    && out[i - 1] == 0
+                    && out[i - dims.x..i - dims.x + 4] == [0; 4]
+                    && (lz == 0 || out[i - plane..i - plane + 4] == [0; 4])
+                    && q_states
+                        .iter()
+                        .all(|s| (s & ((1 << DEFAULT_SCALE_BITS) - 1)) < zero_freq)
+                {
+                    // All four slots select q=0 in context zero. Decoding in
+                    // lane order preserves byte-stack consumption exactly.
+                    for state in &mut q_states {
+                        let slot = *state & ((1 << DEFAULT_SCALE_BITS) - 1);
+                        let value = zero_freq * (*state >> DEFAULT_SCALE_BITS) + slot;
+                        *state = renormalize_q(value, block.q_bytes, &mut q_pos)?;
+                    }
+                    out[i..i + 4].fill(0);
+                    x += 4;
+                    continue;
+                }
+                decode_q_packed_one::<DEFAULT>(
                     out,
                     i,
                     lz,
@@ -1400,7 +1596,7 @@ fn decode_q_block_into_packed(
                     tables.total,
                     tables.scale_bits,
                 )?;
-                decode_q_packed_one(
+                decode_q_packed_one::<DEFAULT>(
                     out,
                     i + 1,
                     lz,
@@ -1418,7 +1614,7 @@ fn decode_q_block_into_packed(
                     tables.total,
                     tables.scale_bits,
                 )?;
-                decode_q_packed_one(
+                decode_q_packed_one::<DEFAULT>(
                     out,
                     i + 2,
                     lz,
@@ -1436,7 +1632,7 @@ fn decode_q_block_into_packed(
                     tables.total,
                     tables.scale_bits,
                 )?;
-                decode_q_packed_one(
+                decode_q_packed_one::<DEFAULT>(
                     out,
                     i + 3,
                     lz,
@@ -1459,7 +1655,7 @@ fn decode_q_block_into_packed(
             while x < dims.x {
                 let i = row0 + x;
                 let lane = i & 3;
-                decode_q_packed_one(
+                decode_q_packed_one::<DEFAULT>(
                     out,
                     i,
                     lz,
@@ -1490,7 +1686,7 @@ fn decode_q_block_into_packed(
     Ok(())
 }
 
-fn decode_block_into_packed(
+fn decode_block_into_packed<const DEFAULT: bool>(
     block: &BorrowedEncodedBlock<'_>,
     dims: Dims,
     mode: ContextMode,
@@ -1498,7 +1694,7 @@ fn decode_block_into_packed(
     tables: &PackedDecodeTables<'_>,
     out: &mut [u16],
 ) -> Result<()> {
-    decode_q_block_into_packed(block, dims, mode, q_alphabet, tables, out)?;
+    decode_q_block_into_packed::<DEFAULT>(block, dims, mode, q_alphabet, tables, out)?;
 
     // Residuals have no spatial dependency, so groups of four map directly to
     // the four serialized rANS lanes and can be explicitly unrolled.
@@ -1507,7 +1703,7 @@ fn decode_block_into_packed(
     let mut i = 0usize;
     while i + 4 <= out.len() {
         let (head, tail) = out[i..i + 4].split_at_mut(1);
-        decode_r_packed_one(
+        decode_r_packed_one::<DEFAULT>(
             &mut head[0],
             &mut r_states[0],
             block.r_bytes,
@@ -1517,7 +1713,7 @@ fn decode_block_into_packed(
             tables.scale_bits,
         )?;
         let (head, tail) = tail.split_at_mut(1);
-        decode_r_packed_one(
+        decode_r_packed_one::<DEFAULT>(
             &mut head[0],
             &mut r_states[1],
             block.r_bytes,
@@ -1527,7 +1723,7 @@ fn decode_block_into_packed(
             tables.scale_bits,
         )?;
         let (head, tail) = tail.split_at_mut(1);
-        decode_r_packed_one(
+        decode_r_packed_one::<DEFAULT>(
             &mut head[0],
             &mut r_states[2],
             block.r_bytes,
@@ -1536,7 +1732,7 @@ fn decode_block_into_packed(
             tables.total,
             tables.scale_bits,
         )?;
-        decode_r_packed_one(
+        decode_r_packed_one::<DEFAULT>(
             &mut tail[0],
             &mut r_states[3],
             block.r_bytes,
@@ -1549,7 +1745,7 @@ fn decode_block_into_packed(
     }
     while i < out.len() {
         let lane = i & 3;
-        decode_r_packed_one(
+        decode_r_packed_one::<DEFAULT>(
             &mut out[i],
             &mut r_states[lane],
             block.r_bytes,
@@ -1568,7 +1764,7 @@ fn decode_block_into_packed(
     Ok(())
 }
 
-fn accumulate_q_block_counts(
+fn accumulate_q_block_counts<const DEFAULT: bool>(
     acc: &mut [u64],
     q: &[u8],
     dims: Dims,
@@ -1576,23 +1772,50 @@ fn accumulate_q_block_counts(
     mode: ContextMode,
     q_alphabet: usize,
 ) {
+    let mode = if DEFAULT { ContextMode::Mean } else { mode };
     let plane = dims.x * dims.y;
     for lz in 0..block.depth {
         let gz = block.z0 + lz;
         let zbase = gz * plane;
         for y in 0..dims.y {
             let row = zbase + y * dims.x;
-            for x in 0..dims.x {
-                let idx = row + x;
-                let qs = q[idx] as usize;
-                let ctx = q_context(q, dims, block.z0, lz, y, x, mode, q_alphabet);
-                acc[ctx * q_alphabet + qs] += 1;
+            macro_rules! accumulate_one {
+                ($x:expr) => {{
+                    let x = $x;
+                    let idx = row + x;
+                    let qs = q[idx] as usize;
+                    let ctx = q_context(q, dims, block.z0, lz, y, x, mode, q_alphabet);
+                    acc[ctx * q_alphabet + qs] += 1;
+                }};
+            }
+            if DEFAULT {
+                accumulate_one!(0);
+                let mut x = 1;
+                while x + 4 <= dims.x {
+                    if y > 0 && zero_q_neighborhood(q, row + x, dims.x, plane, lz) {
+                        acc[0] += 4;
+                    } else {
+                        accumulate_one!(x);
+                        accumulate_one!(x + 1);
+                        accumulate_one!(x + 2);
+                        accumulate_one!(x + 3);
+                    }
+                    x += 4;
+                }
+                while x < dims.x {
+                    accumulate_one!(x);
+                    x += 1;
+                }
+            } else {
+                for x in 0..dims.x {
+                    accumulate_one!(x);
+                }
             }
         }
     }
 }
 
-fn encode_q_only_block(
+fn encode_q_only_block<const DEFAULT: bool>(
     q: &[u8],
     dims: Dims,
     block: BlockSpec,
@@ -1600,23 +1823,88 @@ fn encode_q_only_block(
     q_alphabet: usize,
     q_model: &StaticModel,
 ) -> Result<EncodedBlock> {
+    let mode = if DEFAULT { ContextMode::Mean } else { mode };
     let plane = dims.x * dims.y;
     let block_voxels = block.depth * plane;
     let mut q_states = [RANS_L; LANES];
     let mut q_bytes = Vec::with_capacity(block_voxels / 8 + 1024);
+
+    let zero_symbol = q_model.encode.first().filter(|s| s.renorm_threshold != 0);
 
     for lz in (0..block.depth).rev() {
         let gz = block.z0 + lz;
         let zbase = gz * plane;
         for y in (0..dims.y).rev() {
             let row = zbase + y * dims.x;
-            for x in (0..dims.x).rev() {
-                let local_i = lz * plane + y * dims.x + x;
-                let lane = local_i & (LANES - 1);
-                let idx = row + x;
-                let qs = q[idx] as usize;
-                let qctx = q_context(q, dims, block.z0, lz, y, x, mode, q_alphabet);
-                rans_encode_symbol(&mut q_states[lane], &mut q_bytes, q_model, qctx, qs)?;
+            macro_rules! encode_one {
+                ($x:expr, $lane:expr) => {{
+                    let x = $x;
+                    let lane = $lane;
+                    let idx = row + x;
+                    let qs = q[idx] as usize;
+                    let qctx = q_context(q, dims, block.z0, lz, y, x, mode, q_alphabet);
+                    rans_encode_symbol::<DEFAULT>(
+                        &mut q_states[lane],
+                        &mut q_bytes,
+                        q_model,
+                        qctx,
+                        qs,
+                    )?;
+                }};
+            }
+            if DEFAULT {
+                // Preserve reverse symbol/byte-stack order while making the
+                // four independent rANS state lanes explicit to the compiler.
+                let local_row = lz * plane + y * dims.x;
+                let mut x = dims.x;
+                while x > 0 && ((local_row + x - 1) & 3) != 3 {
+                    x -= 1;
+                    encode_one!(x, (local_row + x) & 3);
+                }
+                while x >= 4 {
+                    x -= 4;
+                    if let Some(symbol) = zero_symbol {
+                        if x > 0 && y > 0 && zero_q_neighborhood(q, row + x, dims.x, plane, lz) {
+                            rans_encode_prepared::<true>(
+                                &mut q_states[3],
+                                &mut q_bytes,
+                                symbol,
+                                DEFAULT_SCALE_BITS,
+                            );
+                            rans_encode_prepared::<true>(
+                                &mut q_states[2],
+                                &mut q_bytes,
+                                symbol,
+                                DEFAULT_SCALE_BITS,
+                            );
+                            rans_encode_prepared::<true>(
+                                &mut q_states[1],
+                                &mut q_bytes,
+                                symbol,
+                                DEFAULT_SCALE_BITS,
+                            );
+                            rans_encode_prepared::<true>(
+                                &mut q_states[0],
+                                &mut q_bytes,
+                                symbol,
+                                DEFAULT_SCALE_BITS,
+                            );
+                            continue;
+                        }
+                    }
+                    encode_one!(x + 3, 3);
+                    encode_one!(x + 2, 2);
+                    encode_one!(x + 1, 1);
+                    encode_one!(x, 0);
+                }
+                while x > 0 {
+                    x -= 1;
+                    encode_one!(x, (local_row + x) & 3);
+                }
+            } else {
+                for x in (0..dims.x).rev() {
+                    encode_one!(x, (lz * plane + y * dims.x + x) & (LANES - 1));
+                }
             }
         }
     }
@@ -1722,7 +2010,10 @@ pub fn compress_lossy_u16_with_stats(
         .map(|batch| {
             let mut acc = vec![0u64; q_count_len];
             for &block in batch {
-                accumulate_q_block_counts(&mut acc, &q, dims, block, mode, q_alphabet);
+                default_kernel!(
+                    mode == ContextMode::Mean,
+                    accumulate_q_block_counts(&mut acc, &q, dims, block, mode, q_alphabet)
+                );
             }
             acc
         })
@@ -1739,7 +2030,12 @@ pub fn compress_lossy_u16_with_stats(
     let encode_start = Instant::now();
     let encoded_results: Vec<Result<EncodedBlock>> = blocks
         .par_iter()
-        .map(|&block| encode_q_only_block(&q, dims, block, mode, q_alphabet, &q_model))
+        .map(|&block| {
+            default_kernel!(
+                mode == ContextMode::Mean && scale_bits == DEFAULT_SCALE_BITS,
+                encode_q_only_block(&q, dims, block, mode, q_alphabet, &q_model)
+            )
+        })
         .collect();
     let mut encoded = Vec::with_capacity(encoded_results.len());
     for b in encoded_results {
@@ -1879,8 +2175,11 @@ pub fn compress_u16_with_stats(
         .map(|batch| {
             let mut acc = Counts::new(q_count_len, r_count_len);
             for &block in batch {
-                accumulate_block_counts(
-                    &mut acc, input, &q, dims, block, mode, q_alphabet, r_alphabet,
+                default_kernel!(
+                    mode == ContextMode::Mean,
+                    accumulate_block_counts(
+                        &mut acc, input, &q, dims, block, mode, q_alphabet, r_alphabet,
+                    )
                 );
             }
             acc
@@ -1894,7 +2193,12 @@ pub fn compress_u16_with_stats(
     let encode_start = Instant::now();
     let encoded_results: Vec<Result<EncodedBlock>> = blocks
         .par_iter()
-        .map(|&block| encode_block(input, &q, dims, block, mode, q_alphabet, &q_model, &r_model))
+        .map(|&block| {
+            default_kernel!(
+                mode == ContextMode::Mean && scale_bits == DEFAULT_SCALE_BITS,
+                encode_block(input, &q, dims, block, mode, q_alphabet, &q_model, &r_model)
+            )
+        })
         .collect();
     let mut encoded = Vec::with_capacity(encoded_results.len());
     for b in encoded_results {
@@ -2220,13 +2524,16 @@ fn decode_lossless_stream_into(stream: &ParsedLosslessStream<'_>, out: &mut [u16
                 }
                 return Ok(());
             }
-            decode_block_into_packed(
-                block,
-                stream.dims,
-                stream.mode,
-                stream.q_alphabet,
-                &tables,
-                chunk,
+            default_kernel!(
+                stream.mode == ContextMode::Mean && stream.scale_bits == DEFAULT_SCALE_BITS,
+                decode_block_into_packed(
+                    block,
+                    stream.dims,
+                    stream.mode,
+                    stream.q_alphabet,
+                    &tables,
+                    chunk,
+                )
             )
         })?;
 
@@ -2464,13 +2771,16 @@ fn decode_lossy_stream_into(stream: &ParsedLossyStream<'_>, out: &mut [u16]) -> 
             }
             // Context prediction needs q throughout this block. Reconstruct only
             // after all its q symbols are decoded; blocks are independent.
-            decode_q_block_into_packed(
-                block,
-                stream.dims,
-                stream.mode,
-                stream.q_alphabet,
-                &tables,
-                chunk,
+            default_kernel!(
+                stream.mode == ContextMode::Mean && tables.scale_bits == DEFAULT_SCALE_BITS,
+                decode_q_block_into_packed(
+                    block,
+                    stream.dims,
+                    stream.mode,
+                    stream.q_alphabet,
+                    &tables,
+                    chunk,
+                )
             )?;
             for pixel in chunk {
                 *pixel = stream.reconstruction[*pixel as usize];
@@ -3592,13 +3902,21 @@ mod tests {
             let mut value = 0;
             let mut state = RANS_L + 12345;
             let mut pos = 0;
-            decode_r_packed_one(&mut value, &mut state, &[], &mut pos, &table, total, scale)
-                .unwrap();
+            decode_r_packed_one::<false>(
+                &mut value,
+                &mut state,
+                &[],
+                &mut pos,
+                &table,
+                total,
+                scale,
+            )
+            .unwrap();
             assert_eq!(value, 0);
             assert_eq!(state, RANS_L + 12345);
             assert_eq!(pos, 0);
             state = 0;
-            assert!(decode_r_packed_one(
+            assert!(decode_r_packed_one::<false>(
                 &mut value,
                 &mut state,
                 &[],
@@ -3610,7 +3928,7 @@ mod tests {
             .is_err());
             state = RANS_L;
             let invalid = vec![PACKED_INVALID; total];
-            assert!(decode_r_packed_one(
+            assert!(decode_r_packed_one::<false>(
                 &mut value,
                 &mut state,
                 &[],
@@ -4190,6 +4508,198 @@ mod tests {
     }
 
     #[test]
+    fn default_kernels_match_general_kernels_at_edges_and_zero_transitions() {
+        for (x, y, z) in [(1, 1, 1), (3, 2, 5), (7, 5, 7), (16, 8, 4), (129, 17, 9)] {
+            let dims = Dims { x, y, z };
+            for pattern in 0..3 {
+                let input: Vec<u16> = (0..dims.voxels().unwrap())
+                    .map(|i| {
+                        let x = i % dims.x;
+                        let y = i / dims.x % dims.y;
+                        let z = i / (dims.x * dims.y);
+                        match pattern {
+                            0 => 0,
+                            1 if !(x / 7 + y / 5 + z / 3).is_multiple_of(4) => 0,
+                            1 => ((i * 431 + 17) % 65000) as u16,
+                            _ => (i as u32).wrapping_mul(1664525).wrapping_add(1013904223) as u16,
+                        }
+                    })
+                    .collect();
+                let q: Vec<_> = input.iter().map(|&v| make_sqrt_lut()[v as usize]).collect();
+                let alphabet = q.iter().copied().max().unwrap() as usize + 1;
+                let r_alphabet = 2 * (alphabet - 1) + 1;
+                let contexts = q_context_count(alphabet, ContextMode::Mean);
+                let mut general = Counts::new(contexts * alphabet, alphabet * r_alphabet);
+                let mut fast = Counts::new(contexts * alphabet, alphabet * r_alphabet);
+                let mut q_only = vec![0; contexts * alphabet];
+                let blocks = block_specs(z, 4);
+                for &block in &blocks {
+                    accumulate_block_counts::<false>(
+                        &mut general,
+                        &input,
+                        &q,
+                        dims,
+                        block,
+                        ContextMode::Mean,
+                        alphabet,
+                        r_alphabet,
+                    );
+                    accumulate_block_counts::<true>(
+                        &mut fast,
+                        &input,
+                        &q,
+                        dims,
+                        block,
+                        ContextMode::Mean,
+                        alphabet,
+                        r_alphabet,
+                    );
+                    accumulate_q_block_counts::<true>(
+                        &mut q_only,
+                        &q,
+                        dims,
+                        block,
+                        ContextMode::Mean,
+                        alphabet,
+                    );
+                }
+                assert_eq!(general.q, fast.q);
+                assert_eq!(general.r, fast.r);
+                assert_eq!(general.q, q_only);
+                let qm =
+                    StaticModel::from_counts(&general.q, contexts, alphabet, DEFAULT_SCALE_BITS)
+                        .unwrap();
+                let rm =
+                    StaticModel::from_counts(&general.r, alphabet, r_alphabet, DEFAULT_SCALE_BITS)
+                        .unwrap();
+                let qt = packed_q_decode_table(&qm).unwrap();
+                let rt = packed_r_decode_table(&rm).unwrap();
+                let tables = PackedDecodeTables {
+                    q: &qt,
+                    r: &rt,
+                    total: 1 << DEFAULT_SCALE_BITS,
+                    scale_bits: DEFAULT_SCALE_BITS,
+                };
+                for block in blocks {
+                    let reference = encode_block::<false>(
+                        &input,
+                        &q,
+                        dims,
+                        block,
+                        ContextMode::Mean,
+                        alphabet,
+                        &qm,
+                        &rm,
+                    )
+                    .unwrap();
+                    let encoded = encode_block::<true>(
+                        &input,
+                        &q,
+                        dims,
+                        block,
+                        ContextMode::Mean,
+                        alphabet,
+                        &qm,
+                        &rm,
+                    )
+                    .unwrap();
+                    assert_eq!(reference.q_states, encoded.q_states);
+                    assert_eq!(reference.r_states, encoded.r_states);
+                    assert_eq!(reference.q_bytes, encoded.q_bytes);
+                    assert_eq!(reference.r_bytes, encoded.r_bytes);
+                    let only = encode_q_only_block::<true>(
+                        &q,
+                        dims,
+                        block,
+                        ContextMode::Mean,
+                        alphabet,
+                        &qm,
+                    )
+                    .unwrap();
+                    assert_eq!(reference.q_states, only.q_states);
+                    assert_eq!(reference.q_bytes, only.q_bytes);
+                    let borrowed = BorrowedEncodedBlock {
+                        depth: block.depth,
+                        raw: false,
+                        q_states: reference.q_states,
+                        r_states: reference.r_states,
+                        q_bytes: &reference.q_bytes,
+                        r_bytes: &reference.r_bytes,
+                        record: &[],
+                        crc: 0,
+                    };
+                    let size = block.depth * dims.x * dims.y;
+                    let start = block.z0 * dims.x * dims.y;
+                    let mut fast_out = vec![0; size];
+                    let mut general_out = vec![0; size];
+                    decode_block_into_packed::<false>(
+                        &borrowed,
+                        dims,
+                        ContextMode::Mean,
+                        alphabet,
+                        &tables,
+                        &mut general_out,
+                    )
+                    .unwrap();
+                    decode_block_into_packed::<true>(
+                        &borrowed,
+                        dims,
+                        ContextMode::Mean,
+                        alphabet,
+                        &tables,
+                        &mut fast_out,
+                    )
+                    .unwrap();
+                    assert_eq!(fast_out, general_out);
+                    assert_eq!(fast_out, input[start..start + size]);
+                    decode_q_block_into_packed::<true>(
+                        &borrowed,
+                        dims,
+                        ContextMode::Mean,
+                        alphabet,
+                        &tables,
+                        &mut fast_out,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        fast_out,
+                        q[start..start + size]
+                            .iter()
+                            .map(|&v| v as u16)
+                            .collect::<Vec<_>>()
+                    );
+                    if !reference.q_bytes.is_empty() {
+                        let broken = BorrowedEncodedBlock {
+                            q_bytes: &reference.q_bytes[..reference.q_bytes.len() - 1],
+                            ..borrowed
+                        };
+                        let a = decode_q_block_into_packed::<false>(
+                            &broken,
+                            dims,
+                            ContextMode::Mean,
+                            alphabet,
+                            &tables,
+                            &mut general_out,
+                        );
+                        let b = decode_q_block_into_packed::<true>(
+                            &broken,
+                            dims,
+                            ContextMode::Mean,
+                            alphabet,
+                            &tables,
+                            &mut fast_out,
+                        );
+                        assert_eq!(a.is_ok(), b.is_ok());
+                        if a.is_ok() {
+                            assert_eq!(fast_out, general_out);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn reciprocal_rans_encoder_matches_division_at_all_frequencies() {
         for scale_bits in MIN_SCALE_BITS..=MAX_SCALE_BITS {
             let total = 1u32 << scale_bits;
@@ -4230,7 +4740,8 @@ mod tests {
                         ((expected_state / freq) << scale_bits) + expected_state % freq + cum;
                     let mut actual_state = initial;
                     let mut actual_bytes = Vec::new();
-                    rans_encode_symbol(&mut actual_state, &mut actual_bytes, &model, 0, 1).unwrap();
+                    rans_encode_symbol::<false>(&mut actual_state, &mut actual_bytes, &model, 0, 1)
+                        .unwrap();
                     assert_eq!(
                         actual_state, expected_state,
                         "scale={scale_bits}, freq={freq}, x={initial}"
@@ -4239,6 +4750,14 @@ mod tests {
                         actual_bytes, expected_bytes,
                         "scale={scale_bits}, freq={freq}, x={initial}"
                     );
+                    if scale_bits == DEFAULT_SCALE_BITS {
+                        let mut fast_state = initial;
+                        let mut fast_bytes = Vec::new();
+                        rans_encode_symbol::<true>(&mut fast_state, &mut fast_bytes, &model, 0, 1)
+                            .unwrap();
+                        assert_eq!(fast_state, expected_state);
+                        assert_eq!(fast_bytes, expected_bytes);
+                    }
                 }
             }
         }
