@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.5
+
+- Faster TIFF export borrows planes directly from decoded volumes/chunks and
+  overlaps decoding with TIFF directory preparation and ordered output;
+- ImageJ TIFF directory prefixes up to 8 MiB are buffered to avoid small
+  seek-triggered writes, preserving contiguous pixels and valid directories;
+- Bounded read-ahead accounts for decoder working space and uses direct cached
+  reads when large units or interleaved channel volumes exceed the allowance.
+
 ## 0.8.4
 
 - Streaming TIFF/Radelta pipelines overlap reading, compression and ordered

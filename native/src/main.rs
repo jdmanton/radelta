@@ -1,5 +1,6 @@
 mod ome;
 mod prefetch;
+mod tiff_export;
 mod tiff_io;
 mod tiff_metadata;
 use ome::infer_ome_layout;
@@ -1606,134 +1607,6 @@ fn parse_decode_options(args: &[String]) -> Result<(Option<String>, usize), Stri
     Ok((order, memory))
 }
 
-struct DecodedBatch {
-    first: usize,
-    planes: usize,
-    pixels: Vec<u16>,
-}
-
-struct DirectPlaneSource {
-    file: std::sync::Arc<radelta_native::RadeltaFileHandle>,
-    d: Dims5,
-    pixels: Vec<u16>,
-}
-impl tiff_metadata::PlaneSource for DirectPlaneSource {
-    fn plane(&mut self, i: usize) -> Result<&[u16], String> {
-        let d = self.d;
-        self.file
-            .read_plane(i / (d.c * d.z), (i / d.z) % d.c, i % d.z, &mut self.pixels)?;
-        Ok(&self.pixels)
-    }
-}
-
-struct PrefetchedPlaneSource {
-    ahead: prefetch::Prefetch<DecodedBatch>,
-    mapping: std::sync::Arc<Vec<usize>>,
-    current: Option<DecodedBatch>,
-    page: usize,
-    plane: usize,
-}
-impl tiff_metadata::PlaneSource for PrefetchedPlaneSource {
-    fn plane(&mut self, canonical: usize) -> Result<&[u16], String> {
-        if self.mapping.get(self.page) != Some(&canonical) {
-            return Err("TIFF writer requested unexpected plane order".into());
-        }
-        if self
-            .current
-            .as_ref()
-            .is_none_or(|b| self.page == b.first + b.planes)
-        {
-            if let Some(old) = self.current.take() {
-                self.ahead.recycle(old);
-            }
-            let batch = self.ahead.next()?.ok_or("decode pipeline ended early")?;
-            if batch.first != self.page {
-                return Err("decode pipeline returned unexpected plane order".into());
-            }
-            self.current = Some(batch);
-        }
-        let batch = self.current.as_ref().unwrap();
-        let start = (self.page - batch.first) * self.plane;
-        self.page += 1;
-        Ok(&batch.pixels[start..start + self.plane])
-    }
-}
-
-fn decode_to_tiff(
-    file: std::sync::Arc<radelta_native::RadeltaFileHandle>,
-    d: Dims5,
-    order: Option<&str>,
-    memory_mib: usize,
-    path: &Path,
-) -> Result<(), String> {
-    let budget = memory_mib
-        .checked_mul(1024 * 1024)
-        .ok_or("memory budget overflow")?;
-    let plane = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
-    let plane_bytes = plane.checked_mul(2).ok_or("plane size overflow")?;
-    let mapping = std::sync::Arc::new(tiff_metadata::write_order(d, order, file.metadata())?);
-    let count = ((budget / 8).min(32 * 1024 * 1024) / plane_bytes)
-        .clamp(1, 128)
-        .min(mapping.len());
-    // Sequential batches smaller than one stored unit add buffering without
-    // exposing independent units to the codec pool. Keep the direct path.
-    let sequential_unit = count <= file.decode_unit_depth()?
-        && mapping.iter().enumerate().all(|(page, &i)| page == i);
-    // Two output buffers share at most 1/4 of the allowance (64 MiB max),
-    // except when a single plane is larger. Keep the existing cache ceiling.
-    if plane_bytes > budget / 8 || mapping.len() == 1 || sequential_unit {
-        file.set_cache_limit((budget / 4).min(radelta_native::DEFAULT_FILE_CACHE_BYTES))?;
-        let mut source = DirectPlaneSource {
-            file: file.clone(),
-            d,
-            pixels: pixel_buffer(plane)?,
-        };
-        return tiff_metadata::write(path, d, order, file.metadata(), &mut source);
-    }
-    file.set_cache_limit((budget / 4).min(radelta_native::DEFAULT_FILE_CACHE_BYTES))?;
-    let make_buffer = || {
-        Ok::<_, String>(DecodedBatch {
-            first: 0,
-            planes: 0,
-            pixels: pixel_buffer(plane.checked_mul(count).ok_or("batch size overflow")?)?,
-        })
-    };
-    let source = file.clone();
-    let sequence = mapping.clone();
-    let mut next = 0;
-    let ahead = prefetch::Prefetch::new(vec![make_buffer()?, make_buffer()?], move |batch| {
-        if next == sequence.len() {
-            return Ok(false);
-        }
-        let n = count.min(sequence.len() - next);
-        let coords: Vec<_> = sequence[next..next + n]
-            .iter()
-            .map(|&i| (i / (d.c * d.z), (i / d.z) % d.c, i % d.z))
-            .collect();
-        batch.pixels.resize(n * plane, 0);
-        source.read_planes_with_budget(
-            &coords,
-            &mut batch.pixels,
-            (budget / 2).min(256 * 1024 * 1024) as u64,
-        )?;
-        batch.first = next;
-        batch.planes = n;
-        next += n;
-        Ok(true)
-    })?;
-    let mut source = PrefetchedPlaneSource {
-        ahead,
-        mapping,
-        current: None,
-        page: 0,
-        plane,
-    };
-    let result = tiff_metadata::write(path, d, order, file.metadata(), &mut source);
-    // Source drop closes both channels and joins the read worker before publish.
-    drop(source);
-    result
-}
-
 fn configure_metadata_limit(args: &mut Vec<String>) -> Result<(), String> {
     let mut i = 2;
     while i < args.len() {
@@ -1960,7 +1833,7 @@ fn main() {
                     .map_err(|e| e.to_string())?;
                 drop(reserved);
                 let metadata_len = file.metadata().len();
-                decode_to_tiff(
+                tiff_export::write(
                     std::sync::Arc::new(file),
                     d,
                     order.as_deref(),

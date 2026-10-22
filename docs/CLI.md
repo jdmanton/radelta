@@ -275,23 +275,34 @@ later write or at finish, so callers must check finish before treating a file
 as saved. Closing an unfinished or failed writer joins its queued work and
 removes the temporary output.
 
-TIFF export also reads ahead in output-page order while writing the previous
-batch. `decode --memory-mib N` controls its approximate allowance (default
-2048 MiB). Two reusable output buffers together occupy at most one quarter of
-that allowance, capped at 64 MiB except for larger individual planes. The
-retention cache is limited to one quarter, capped at 256 MiB, and in-flight
-pixels plus compressed payloads use at most half, capped at 256 MiB. A plane
-that is too large for read-ahead uses the direct reader. Sequential output also
-uses direct reads when a batch cannot span multiple stored units, avoiding
-extra buffers where independent-unit parallelism would be unavailable.
+TIFF export reads ahead in stored volume/chunk units, borrowing each output
+plane directly from its decoded unit. There are no separate output batch
+buffers or retention-cache copies in this path. `decode --memory-mib N`
+controls the approximate allowance (default 2048 MiB). The exporter charges
+each resident unit against that allowance until its last output page, including
+interleaved channel layouts. Its conservative estimate reserves four times the
+decoded pixel size plus the compressed payload for each unit, allowing for
+codec scratch and allocator reuse.
+It also limits queued work using estimated codec-block counts and bounds the number
+of resident units, so small chunks cannot create an unlimited task queue.
+Decoding starts while TIFF directories are being prepared. ImageJ directory
+prefixes up to 8 MiB are serialized in memory before one buffered write, avoiding
+small seek-triggered flushes; larger prefixes retain the file-backed path.
+
+If even one unit's working estimate exceeds the allowance, or interleaved
+output requires more simultaneously retained units than it permits, export
+uses direct plane reads with an adaptive cache
+limited to one quarter of the allowance, capped at 256 MiB. This can re-decode
+evicted channel data; increasing the allowance enables the faster unit path.
 
 These are working-buffer allowances, not hard process-RSS limits. Codec models,
 scratch, TIFF directories and metadata also use memory, and at least one whole
 stored Radelta volume/chunk must fit for decoding. One unit larger than the
 allowance can therefore proceed, as with the file reader API.
 
-See [pipeline measurements](STREAM_PIPELINE_PERFORMANCE.md) for local timing,
-memory tradeoffs and a procedure for comparing real acquisitions.
+See [TIFF export measurements](TIFF_EXPORT_PERFORMANCE.md) and the initial
+[pipeline measurements](STREAM_PIPELINE_PERFORMANCE.md) for local timing,
+memory tradeoffs and procedures for comparing real acquisitions.
 
 ## HDF5 conversion
 

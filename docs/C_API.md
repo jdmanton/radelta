@@ -135,6 +135,13 @@ restores the original single-entry cache. One oversized entry is always allowed;
 this is a retention budget, not a cap on the decoder's total working memory.
 Rust callers can use `RadeltaFileHandle::set_cache_limit(bytes)`.
 
+Rust exporters can query `decode_unit_info(t,c,z)` for a stored unit's key,
+starting Z, depth and compressed size, then call `decode_unit(t,c,z)` to obtain
+owned Z,Y,X pixels without inserting them into the retention cache. Keys are
+local to one open handle. Concurrent calls share the existing Rayon pool;
+the handle lock covers payload reads, not codec work. Callers control the
+number and lifetime of these owned buffers. The C ABI is unchanged.
+
 ## Streaming writer
 
 The writer API emits `RDS3` or `RQS3` files without holding the whole dataset in RAM. Planes are supplied sequentially in increasing `T,C,Z` order.

@@ -38,7 +38,8 @@ pub use ffi::{
     RADELTA_INVALID_ARGUMENT, RADELTA_OK,
 };
 pub use file_api::{
-    RadeltaFileHandle, RadeltaFileInfo, RadeltaStreamWriter, DEFAULT_FILE_CACHE_BYTES,
+    RadeltaDecodeUnit, RadeltaFileHandle, RadeltaFileInfo, RadeltaStreamWriter,
+    DEFAULT_FILE_CACHE_BYTES,
 };
 
 const MAGIC: &[u8; 4] = b"RDL1";

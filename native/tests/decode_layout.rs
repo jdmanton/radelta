@@ -164,3 +164,51 @@ fn single_plane_keeps_its_colormap() {
         assert!(!dec.more_images(), "a single plane must end the IFD chain");
     }
 }
+
+#[test]
+fn interleaved_export_matches_with_and_without_room_to_retain_channel_volumes() {
+    use radelta_native::{compress_u16_nd, Dims5, Options};
+    let d = Dims5 {
+        x: 512,
+        y: 128,
+        z: 5,
+        c: 3,
+        t: 1,
+    };
+    let plane = d.x * d.y;
+    let pixels: Vec<_> = (0..d.voxels().unwrap())
+        .map(|i| (i * 31 + i / plane * 997) as u16)
+        .collect();
+    let path = temp_path("interleaved-budget.rdlt");
+    fs::write(
+        &path,
+        compress_u16_nd(&pixels, d, Options::default()).unwrap(),
+    )
+    .unwrap();
+    for budget in ["1", "16"] {
+        let out = temp_path(&format!("interleaved-budget-{budget}.tif"));
+        run(&[
+            "decode",
+            path.to_str().unwrap(),
+            out.to_str().unwrap(),
+            "--page-order",
+            "TZC",
+            "--memory-mib",
+            budget,
+        ]);
+        let mut decoder = Decoder::new(fs::File::open(&out).unwrap()).unwrap();
+        for z in 0..d.z {
+            for c in 0..d.c {
+                let at = (c * d.z + z) * plane;
+                let DecodingResult::U16(got) = decoder.read_image().unwrap() else {
+                    panic!("unexpected sample type")
+                };
+                assert_eq!(got, pixels[at..at + plane]);
+                if z + 1 != d.z || c + 1 != d.c {
+                    decoder.next_image().unwrap();
+                }
+            }
+        }
+        assert!(!decoder.more_images());
+    }
+}

@@ -1,9 +1,12 @@
-# Streaming pipeline measurements
+# Initial streaming pipeline measurements
+
+These measurements describe the first batch-based TIFF exporter. The subsequent
+decoded-unit exporter is measured in [TIFF export performance](TIFF_EXPORT_PERFORMANCE.md).
 
 The pipeline helps most when TIFF reading or many shallow, independently
 encoded volumes leave CPU workers idle. Deep chunks already parallelize within
-the codec, so they show smaller gains. Sequential TIFF export keeps direct reads
-when a read-ahead batch cannot span multiple stored units.
+the codec, so they show smaller gains. The initial TIFF exporter kept direct
+reads when a read-ahead batch could not span multiple stored units.
 
 ## Local comparison
 

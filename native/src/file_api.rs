@@ -57,6 +57,16 @@ pub struct RadeltaFileInfo {
     pub flags: u32,
 }
 
+/// An independently decoded volume or streaming chunk within one open file.
+/// Keys identify units only within that handle. The last chunk can be shorter.
+#[derive(Clone, Copy, Debug)]
+pub struct RadeltaDecodeUnit {
+    pub key: usize,
+    pub z0: usize,
+    pub depth: usize,
+    pub encoded_bytes: u64,
+}
+
 #[derive(Clone, Copy)]
 struct Segment {
     offset: u64,
@@ -828,6 +838,45 @@ impl RadeltaFileHandle {
         })
     }
 
+    fn unit_at(&self, t: usize, c: usize, z: usize) -> std::result::Result<DecodeUnit, String> {
+        if t >= self.dims.t || c >= self.dims.c || z >= self.dims.z {
+            return Err("requested T/C/Z plane is out of range".into());
+        }
+        let backing = self
+            .backing
+            .lock()
+            .map_err(|_| "Radelta file handle mutex is poisoned")?;
+        decode_unit(&backing, self.dims, t, c, z)
+    }
+
+    /// Query the stored unit containing a TCZ plane without reading its payload.
+    pub fn decode_unit_info(
+        &self,
+        t: usize,
+        c: usize,
+        z: usize,
+    ) -> std::result::Result<RadeltaDecodeUnit, String> {
+        let unit = self.unit_at(t, c, z)?;
+        Ok(RadeltaDecodeUnit {
+            key: unit.key,
+            z0: unit.z0,
+            depth: unit.depth,
+            encoded_bytes: unit.segment.len,
+        })
+    }
+
+    /// Decode the whole unit containing a TCZ plane, bypassing retention caches.
+    /// The returned pixels are Z,Y,X ordered and owned by the caller. Concurrent
+    /// calls share the Rayon codec pool; file reads alone hold the handle lock.
+    pub fn decode_unit(
+        &self,
+        t: usize,
+        c: usize,
+        z: usize,
+    ) -> std::result::Result<Vec<u16>, String> {
+        self.decode_pixels(self.unit_at(t, c, z)?)
+    }
+
     pub fn info(&self) -> RadeltaFileInfo {
         RadeltaFileInfo {
             nx: self.dims.x as u32,
@@ -1085,6 +1134,14 @@ impl RadeltaFileHandle {
         job: PlaneBatch<'_>,
     ) -> std::result::Result<(DecodeUnit, Vec<u16>), String> {
         let unit = job.unit;
+        let pixels = self.decode_pixels(unit)?;
+        for (start, dst) in job.targets {
+            dst.copy_from_slice(&pixels[start..start + dst.len()]);
+        }
+        Ok((unit, pixels))
+    }
+
+    fn decode_pixels(&self, unit: DecodeUnit) -> std::result::Result<Vec<u16>, String> {
         let payload = {
             let mut backing = self
                 .backing
@@ -1097,7 +1154,7 @@ impl RadeltaFileHandle {
             };
             read_payload(file, unit.segment)?
         };
-        let pixels = decompress_u16_expecting(
+        decompress_u16_expecting(
             &payload,
             Dims {
                 x: self.dims.x,
@@ -1105,12 +1162,7 @@ impl RadeltaFileHandle {
                 z: unit.depth,
             },
         )
-        .map_err(|e| format!("{}: {e}", unit.context))?;
-        drop(payload);
-        for (start, dst) in job.targets {
-            dst.copy_from_slice(&pixels[start..start + dst.len()]);
-        }
-        Ok((unit, pixels))
+        .map_err(|e| format!("{}: {e}", unit.context))
     }
 }
 
@@ -2388,6 +2440,19 @@ mod tests {
                 for (&(t, c, z), dst) in coords.iter().zip(expected.chunks_exact_mut(plane)) {
                     single.read_plane(t, c, z, dst).unwrap();
                 }
+                for index in [0, coords.len() - 1] {
+                    let (t, c, z) = coords[index];
+                    let info = single.decode_unit_info(t, c, z).unwrap();
+                    let unit = single.decode_unit(t, c, z).unwrap();
+                    assert_eq!(unit.len(), info.depth * plane);
+                    let offset = (z - info.z0) * plane;
+                    assert_eq!(
+                        &unit[offset..offset + plane],
+                        &expected[index * plane..(index + 1) * plane]
+                    );
+                }
+                assert!(single.decode_unit_info(dims.t, 0, 0).is_err());
+                assert!(single.decode_unit(0, dims.c, 0).is_err());
                 drop(single);
                 for budget in [0, 1, DEFAULT_FILE_CACHE_BYTES] {
                     let reader = RadeltaFileHandle::open(&path).unwrap();

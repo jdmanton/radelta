@@ -622,9 +622,30 @@ fn write_imagej_layout(
 ) -> Result<(), String> {
     let (ifds, data_start) = imagej_header_plan(d, m, mapping.len())?;
     let plane_len = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
+    // TiffEncoder seeks repeatedly to patch IFD links. File-backed BufWriter
+    // flushes on every seek, turning small directory entries into many writes.
+    // Serialize small prefixes in memory, retaining the same validated encoder
+    // and offsets. Large metadata keeps the bounded, file-backed path.
+    let prefix = if data_start <= 8 * 1024 * 1024 {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(data_start as usize)
+            .map_err(|_| "cannot allocate ImageJ TIFF directory buffer")?;
+        let mut cursor = std::io::Cursor::new(bytes);
+        if write_imagej_prefix(&mut cursor, d, m, ifds, data_start)? != data_start
+            || cursor.get_ref().len() as u64 != data_start
+        {
+            return Err("ImageJ TIFF prefix size changed while resolving strip offsets".into());
+        }
+        Some(cursor.into_inner())
+    } else {
+        None
+    };
     let mut out =
         BufWriter::with_capacity(1024 * 1024, File::create(path).map_err(|e| e.to_string())?);
-    if write_imagej_prefix(&mut out, d, m, ifds, data_start)? != data_start {
+    if let Some(prefix) = prefix {
+        out.write_all(&prefix).map_err(|e| e.to_string())?;
+    } else if write_imagej_prefix(&mut out, d, m, ifds, data_start)? != data_start {
         return Err("ImageJ TIFF prefix size changed while resolving strip offsets".into());
     }
     for &canonical in mapping {
@@ -800,5 +821,52 @@ mod imagej_tests {
         assert!(imagej_header_plan(d, &metadata(0), 2)
             .unwrap_err()
             .contains("plane"));
+    }
+
+    #[test]
+    fn buffered_and_large_file_backed_imagej_prefixes_keep_pixels_and_directories_valid() {
+        struct Pixels;
+        impl PlaneSource for Pixels {
+            fn plane(&mut self, canonical: usize) -> Result<&[u16], String> {
+                Ok(if canonical == 0 { &[11, 22] } else { &[33, 44] })
+            }
+        }
+        let d = Dims5 {
+            x: 2,
+            y: 1,
+            z: 2,
+            c: 1,
+            t: 1,
+        };
+        for extra in [0, 8 * 1024 * 1024] {
+            let m = metadata(extra);
+            let path = std::env::temp_dir().join(format!(
+                "radelta-imagej-prefix-{}-{extra}.tif",
+                std::process::id()
+            ));
+            write_imagej_layout(&path, d, &[0, 1], &m, &mut Pixels).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let mut dec = Decoder::new(std::io::Cursor::new(bytes))
+                .unwrap()
+                .with_limits(tiff::decoder::Limits::unlimited());
+            assert_eq!(
+                dec.get_tag_ascii_string(Tag::ImageDescription)
+                    .unwrap()
+                    .len(),
+                m.tags[0][0].bytes.len() - 1
+            );
+            let tiff::decoder::DecodingResult::U16(first) = dec.read_image().unwrap() else {
+                panic!("unexpected sample type")
+            };
+            assert_eq!(first, [11, 22]);
+            dec.next_image().unwrap();
+            let tiff::decoder::DecodingResult::U16(second) = dec.read_image().unwrap() else {
+                panic!("unexpected sample type")
+            };
+            assert_eq!(second, [33, 44]);
+            assert!(!dec.more_images());
+            drop(dec);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 }
