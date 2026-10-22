@@ -127,12 +127,14 @@ def encode_chunk(pixels, axes, options):
     if status != 0:
         raise RuntimeError(f"Native Radelta encoding failed ({status})")
     try:
-        payload = ct.string_at(encoded, size.value)
+        # Borrow the native allocation while calculating the frame checksum
+        # and join directly into the final immutable bytes object.
+        payload = memoryview(np.ctypeslib.as_array(encoded, shape=(size.value,)))
+        prefix = struct.pack("<4sBBHQ", b"RDZ1", 1, int(options["lossy"]), 0, src.nbytes)
+        checksum = zlib.crc32(payload, zlib.crc32(prefix))
+        return b"".join((prefix, struct.pack("<I", checksum), payload))
     finally:
         dll.radelta_buffer_free(encoded, size.value)
-    prefix = struct.pack("<4sBBHQ", b"RDZ1", 1, int(options["lossy"]), 0, src.nbytes)
-    checksum = zlib.crc32(payload, zlib.crc32(prefix))
-    return prefix + struct.pack("<I", checksum) + payload
 
 
 def decode_chunk(encoded, shape, axes, dtype, options):
@@ -146,14 +148,16 @@ def decode_chunk(encoded, shape, axes, dtype, options):
     if (magic != b"RDZ1" or version != 1 or reserved != 0 or mode != int(options["lossy"]) or
             raw_size != math.prod(shape)*2):
         raise ValueError("Radelta Zarr chunk header does not match its array metadata")
-    payload = encoded[_FRAME.size:]
+    # bytes() above preserves snapshot semantics for mutable inputs. Both the
+    # checksum and native decoder can borrow this immutable payload in place.
+    payload = memoryview(encoded)[_FRAME.size:]
     if zlib.crc32(payload, zlib.crc32(encoded[:16])) != checksum:
         raise ValueError("Radelta Zarr chunk checksum mismatch")
     if payload[:4] not in ((b"RDLQ", b"RDQ2") if mode else (b"RDL1", b"RDM2")):
         raise ValueError("Radelta payload mode does not match chunk metadata")
     # The native header must agree with the caller's chunk geometry before any
     # output allocation; a damaged payload cannot request an arbitrary buffer.
-    src = (ct.c_uint8 * len(payload)).from_buffer_copy(payload)
+    src = np.frombuffer(payload, dtype=np.uint8).ctypes.data_as(ct.POINTER(ct.c_uint8))
     count, dims = ct.c_size_t(), [ct.c_uint32() for _ in range(5)]
     dll = library()
     status = dll.radelta_decompress_u16_nd(src, len(payload), None, 0, ct.byref(count), *(ct.byref(d) for d in dims))

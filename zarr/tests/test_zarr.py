@@ -1,4 +1,5 @@
 import copy
+import ctypes as ct
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 import io
@@ -38,6 +39,29 @@ class NativeCase(unittest.TestCase):
 
 
 class CodecTests(NativeCase):
+    def test_native_frame_bytes_and_encoded_buffer_inputs(self):
+        pixels = self.rng.integers(0, 65536, (3, 7, 9), dtype=np.uint16)
+        options = validate_options({})
+        dll = library()
+        pointer, size = ct.POINTER(ct.c_uint8)(), ct.c_size_t()
+        status = dll.radelta_compress_u16_nd_alloc(
+            pixels.ctypes.data_as(ct.POINTER(ct.c_uint16)), pixels.size,
+            9, 7, 3, 1, 1, None, None, ct.byref(pointer), ct.byref(size))
+        self.assertEqual(status, 0)
+        try:
+            payload = ct.string_at(pointer, size.value)
+        finally:
+            dll.radelta_buffer_free(pointer, size.value)
+        prefix = struct.pack("<4sBBHQ", b"RDZ1", 1, 0, 0, pixels.nbytes)
+        expected = prefix + struct.pack("<I", zlib.crc32(payload, zlib.crc32(prefix))) + payload
+        encoded = encode_chunk(pixels, "zyx", options)
+        self.assertIsInstance(encoded, bytes)
+        self.assertEqual(encoded, expected)
+        spaced = bytearray(2 * len(encoded))
+        spaced[::2] = encoded
+        for source in (encoded, bytearray(encoded), memoryview(encoded), memoryview(spaced)[::2]):
+            np.testing.assert_array_equal(decode_chunk(source, pixels.shape, "zyx", "u2", options), pixels)
+
     def test_axes_contexts_byteorders_and_edges(self):
         for fmt in (2, 3):
             for axes, shape in (("yx", (13, 17)), ("zyx", (5, 13, 17)),

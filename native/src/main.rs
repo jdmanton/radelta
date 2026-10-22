@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Instant;
-use tiff::decoder::{Decoder, DecodingResult};
+use tiff::decoder::Decoder;
 use tiff::encoder::{colortype, TiffEncoder, TiffKind, TiffKindBig};
 use tiff::tags::Tag;
 
@@ -498,14 +498,21 @@ fn page_samples(dec: &mut Decoder<BufReader<File>>) -> Result<usize, String> {
 ///
 /// Each sample of a planar page is stored in its own run of strips or tiles,
 /// so only the chunks belonging to `sample` are decoded.
-fn read_sample_plane(
+fn read_sample_plane_into(
     dec: &mut Decoder<BufReader<File>>,
     width: usize,
     height: usize,
     sample: usize,
     samples: usize,
-) -> Result<Vec<u16>, String> {
-    use tiff::decoder::ChunkType;
+    plane: &mut [u16],
+) -> Result<(), String> {
+    use tiff::decoder::{ChunkType, DecodingSampleType};
+    if width.checked_mul(height) != Some(plane.len()) {
+        return Err("TIFF plane size mismatch".into());
+    }
+    if tiff_io::read_raw_sample_plane(dec, plane, sample)? {
+        return Ok(());
+    }
     let chunk_type = dec.get_chunk_type();
     let chunks = match chunk_type {
         ChunkType::Strip => dec.strip_count(),
@@ -527,10 +534,7 @@ fn read_sample_plane(
         ChunkType::Strip => 1,
         ChunkType::Tile => width.div_ceil(chunk_w),
     };
-    let plane_len = width
-        .checked_mul(height)
-        .ok_or("TIFF plane size overflow")?;
-    let mut plane = vec![0u16; plane_len];
+    let mut scratch = Vec::<u16>::new();
     for k in 0..per_plane {
         let index = sample
             .checked_mul(per_plane)
@@ -550,25 +554,32 @@ fn read_sample_plane(
         if read_w < data_w || read_h < data_h || x0 + data_w > width || y0 + data_h > height {
             return Err("planar TIFF strip/tile geometry does not match the page".into());
         }
-        match dec.read_chunk(index).map_err(|e| e.to_string())? {
-            DecodingResult::U16(v) => {
-                if v.len() != read_w * read_h {
-                    return Err(format!(
-                        "planar TIFF chunk {index} decoded to {} samples, expected {}",
-                        v.len(),
-                        read_w * read_h
-                    ));
-                }
-                for row in 0..data_h {
-                    let src = row * read_w;
-                    let dst = (y0 + row) * width + x0;
-                    plane[dst..dst + data_w].copy_from_slice(&v[src..src + data_w]);
-                }
+        let layout = dec
+            .image_chunk_buffer_layout(index)
+            .map_err(|e| e.to_string())?;
+        if !matches!(layout.sample_type, Some(DecodingSampleType::U16))
+            || read_w.checked_mul(read_h).and_then(|n| n.checked_mul(2)) != Some(layout.len)
+        {
+            return Err("expected uint16 samples in planar multisample TIFF page".into());
+        }
+        if x0 == 0 && data_w == width && read_w == width && read_h == data_h {
+            let dst = &mut plane[y0 * width..(y0 + data_h) * width];
+            dec.read_chunk_bytes(index, tiff_io::u16_bytes_mut(dst))
+                .map_err(|e| e.to_string())?;
+        } else {
+            // Edge tiles can contain padding. Reuse one chunk buffer and copy
+            // only its visible rows, rather than allocating for every tile.
+            scratch.resize(read_w * read_h, 0);
+            dec.read_chunk_bytes(index, tiff_io::u16_bytes_mut(&mut scratch))
+                .map_err(|e| e.to_string())?;
+            for row in 0..data_h {
+                let src = row * read_w;
+                let dst = (y0 + row) * width + x0;
+                plane[dst..dst + data_w].copy_from_slice(&scratch[src..src + data_w]);
             }
-            _ => return Err("expected uint16 samples in planar multisample TIFF page".into()),
         }
     }
-    Ok(plane)
+    Ok(())
 }
 
 /// Inferred layout when every TIFF page holds `samples` planar samples.
@@ -652,9 +663,20 @@ fn read_tiff_pages_u16(path: &Path) -> Result<TiffPages, String> {
             ));
         }
         if samples > 1 {
+            let plane_len = width
+                .checked_mul(height)
+                .ok_or("TIFF plane size overflow")?;
             for sample in 0..samples {
-                let plane = read_sample_plane(&mut dec, width, height, sample, samples)?;
-                data.extend_from_slice(&plane);
+                let start = data.len();
+                data.resize(start.checked_add(plane_len).ok_or("TIFF size overflow")?, 0);
+                read_sample_plane_into(
+                    &mut dec,
+                    width,
+                    height,
+                    sample,
+                    samples,
+                    &mut data[start..],
+                )?;
             }
             pages += 1;
             if !dec.more_images() {
@@ -975,10 +997,14 @@ impl PlaneReader {
                     return Err("TIFF plane dimensions changed within dataset".into());
                 }
                 if *samples > 1 {
-                    let plane =
-                        read_sample_plane(dec, *width, *height, source_page % *samples, *samples)?;
-                    out.copy_from_slice(&plane);
-                    return Ok(());
+                    return read_sample_plane_into(
+                        dec,
+                        *width,
+                        *height,
+                        source_page % *samples,
+                        *samples,
+                        out,
+                    );
                 }
                 tiff_io::read_plane(dec, out)
             }

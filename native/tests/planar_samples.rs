@@ -41,13 +41,35 @@ fn align(buf: &mut Vec<u8>) {
 /// Write a little-endian, uncompressed, stripped TIFF by hand: the `tiff`
 /// crate's encoder cannot produce planar multi-sample pages.
 fn write_fixture(path: &Path, f: &Fixture) {
+    write_fixture_mode(path, f, false, false)
+}
+
+fn write_fixture_mode(path: &Path, f: &Fixture, compressed: bool, tiled: bool) {
     let strips_per_plane = H.div_ceil(f.rows_per_strip);
     let mut buf = b"II*\0\0\0\0\0".to_vec();
     let mut next_ifd_pointer = 4usize;
     for page in 0..f.pages {
         let mut offsets = Vec::new();
         let mut counts = Vec::new();
-        if f.planar == 2 {
+        if tiled {
+            assert_eq!(f.planar, 2);
+            for sample in 0..f.samples {
+                offsets.push(buf.len() as u32);
+                counts.push(16 * 16 * 2);
+                for y in 0..16 {
+                    for x in 0..16 {
+                        push_u16(
+                            &mut buf,
+                            if y < H && x < W {
+                                value(page, sample, y, x)
+                            } else {
+                                60000
+                            },
+                        );
+                    }
+                }
+            }
+        } else if f.planar == 2 {
             for sample in 0..f.samples {
                 for strip in 0..strips_per_plane {
                     offsets.push(buf.len() as u32);
@@ -72,6 +94,27 @@ fn write_fixture(path: &Path, f: &Fixture) {
                         }
                     }
                 }
+            }
+        }
+        if compressed {
+            // Independent PackBits encoder: literal runs only. This exercises
+            // decoder buffer placement without a third-party fixture writer.
+            let chunks: Vec<Vec<u8>> = offsets
+                .iter()
+                .zip(&counts)
+                .map(|(&offset, &count)| buf[offset as usize..(offset + count) as usize].to_vec())
+                .collect();
+            buf.truncate(offsets[0] as usize);
+            offsets.clear();
+            counts.clear();
+            for chunk in chunks {
+                let start = buf.len();
+                offsets.push(start as u32);
+                for literals in chunk.chunks(128) {
+                    buf.push((literals.len() - 1) as u8);
+                    buf.extend_from_slice(literals);
+                }
+                counts.push((buf.len() - start) as u32);
             }
         }
         // Out-of-line values, then the IFD itself.
@@ -107,22 +150,39 @@ fn write_fixture(path: &Path, f: &Fixture) {
             } else {
                 (258, 3, f.samples as u32, bits_at)
             },
-            (259, 3, 1, 1),
+            (259, 3, 1, if compressed { 32773 } else { 1 }),
             (262, 3, 1, 1),
             if offsets.len() == 1 {
-                (273, 4, 1, offsets[0])
+                (if tiled { 324 } else { 273 }, 4, 1, offsets[0])
             } else {
-                (273, 4, offsets.len() as u32, offsets_at)
+                (
+                    if tiled { 324 } else { 273 },
+                    4,
+                    offsets.len() as u32,
+                    offsets_at,
+                )
             },
             (277, 3, 1, f.samples as u32),
-            (278, 4, 1, f.rows_per_strip as u32),
-            if counts.len() == 1 {
-                (279, 4, 1, counts[0])
+            if tiled {
+                (322, 4, 1, 16)
             } else {
-                (279, 4, counts.len() as u32, counts_at)
+                (278, 4, 1, f.rows_per_strip as u32)
+            },
+            if counts.len() == 1 {
+                (if tiled { 325 } else { 279 }, 4, 1, counts[0])
+            } else {
+                (
+                    if tiled { 325 } else { 279 },
+                    4,
+                    counts.len() as u32,
+                    counts_at,
+                )
             },
             (284, 3, 1, u32::from(f.planar)),
         ];
+        if tiled {
+            entries.push((323, 4, 1, 16));
+        }
         if let Some((at, len)) = desc {
             entries.push((270, 2, len, at));
         }
@@ -258,6 +318,36 @@ fn planar_samples_become_channels() {
 #[test]
 fn planar_samples_become_channels_when_streaming() {
     planar_round_trip(&["--stream", "--memory-mib", "1"], "stream");
+}
+
+#[test]
+fn compressed_planar_strips_and_padded_tiles_fill_the_correct_planes() {
+    let dir = scratch("compressed");
+    let input = dir.join("input.tif");
+    let encoded = dir.join("image.rdlt");
+    for tiled in [false, true] {
+        write_fixture_mode(
+            &input,
+            &Fixture {
+                pages: 2,
+                samples: 3,
+                rows_per_strip: 3,
+                planar: 2,
+                description: None,
+            },
+            true,
+            tiled,
+        );
+        for streaming in [false, true] {
+            let mut args = vec!["encode", input.to_str().unwrap(), encoded.to_str().unwrap()];
+            if streaming {
+                args.extend(["--stream", "--memory-mib", "1"]);
+            }
+            run_ok(&args);
+            check_encoded(&encoded, 2, 3);
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
