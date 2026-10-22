@@ -50,6 +50,8 @@ def library():
         "radelta_file_set_cache_limit": ([HANDLE, ct.c_uint64], ct.c_int32),
         "radelta_file_get_info": ([HANDLE, ct.POINTER(FileInfo)], ct.c_int32),
         "radelta_file_read_plane_u16": ([HANDLE, *([ct.c_uint32]*3), U16, ct.c_uint64], ct.c_int32),
+        "radelta_file_read_planes_u16": ([HANDLE, ct.c_uint64, ct.POINTER(ct.c_uint32), U16,
+                                         ct.c_uint64], ct.c_int32),
         "radelta_file_get_metadata": ([HANDLE, U8, ct.c_size_t, SIZE], ct.c_int32),
         "radelta_file_last_error": ([ct.c_void_p, ct.c_uint64], ct.c_uint64),
         "radelta_writer_create_lossless_u16": ([ct.c_char_p, *([ct.c_uint32]*6), ct.POINTER(HANDLE)], ct.c_int32),

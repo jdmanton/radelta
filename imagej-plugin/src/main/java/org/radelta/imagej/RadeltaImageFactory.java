@@ -142,21 +142,28 @@ public final class RadeltaImageFactory {
 
     private static ImagePlus openInMemory(String path, RadeltaFile rf) throws IOException {
         final ImageStack stack = new ImageStack(rf.width, rf.height);
-        final long totalPlanes = (long) rf.channels * (long) rf.slices * (long) rf.frames;
-        long done = 0;
+        final int totalPlanes = rf.planeCount();
+        final int batch = rf.loadBatchSize();
 
         try {
             // ImageJ hyperstack order is C fastest, then Z, then T.
-            for (int t = 0; t < rf.frames; ++t) {
-                for (int z = 0; z < rf.slices; ++z) {
-                    for (int c = 0; c < rf.channels; ++c) {
-                        final short[] pixels = rf.readPlane(t, c, z);
-                        stack.addSlice("C=" + (c + 1) + " Z=" + (z + 1) + " T=" + (t + 1), pixels);
-                        done++;
-                        IJ.showProgress((double) done / (double) totalPlanes);
-                        IJ.showStatus("Loading Radelta into RAM: " + done + "/" + totalPlanes + " planes");
-                    }
+            for (int first = 0; first < totalPlanes;) {
+                final int count = Math.min(batch, totalPlanes - first);
+                final int[] tcz = new int[3 * count];
+                for (int k = 0; k < count; ++k) {
+                    final int i = first + k;
+                    tcz[3 * k] = i / (rf.channels * rf.slices);
+                    tcz[3 * k + 1] = i % rf.channels;
+                    tcz[3 * k + 2] = (i / rf.channels) % rf.slices;
                 }
+                final short[][] planes = rf.readPlanes(tcz);
+                for (int k = 0; k < count; ++k) {
+                    stack.addSlice("C=" + (tcz[3 * k + 1] + 1) + " Z=" + (tcz[3 * k + 2] + 1)
+                            + " T=" + (tcz[3 * k] + 1), planes[k]);
+                }
+                first += count;
+                IJ.showProgress((double) first / (double) totalPlanes);
+                IJ.showStatus("Loading Radelta into RAM: " + first + "/" + totalPlanes + " planes");
             }
         } catch (OutOfMemoryError oom) {
             throw new IOException(

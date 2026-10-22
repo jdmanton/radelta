@@ -201,6 +201,22 @@ int32_t radelta_file_read_plane_u16(
     uint64_t output_capacity_voxels
 );
 
+/* Read count planes, with coordinates [t0,c0,z0,t1,c1,z1,...], into consecutive
+   nx*ny output planes in request order. Repeats are allowed. Missing units
+   decode in parallel in the shared Rayon pool. In-flight decoded pixels plus
+   compressed payloads are bounded to 256 MiB per call, except for one oversized
+   unit; cache and codec scratch are separate. count=0 is a no-op and permits
+   NULL coordinate/output pointers. Invalid coordinates/capacity leave output
+   untouched; decode/I/O errors may leave partial output. Input, output and
+   handle memory must not overlap. */
+int32_t radelta_file_read_planes_u16(
+    const radelta_file_handle *handle,
+    uint64_t count,
+    const uint32_t *tcz,
+    uint16_t *output,
+    uint64_t output_capacity_voxels
+);
+
 /* -------------------------------------------------------------------------
  * File-oriented writer API used by applications such as ImageJ/Fiji.
  *

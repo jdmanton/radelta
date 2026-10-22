@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.2
+
+- Faster TIFF and Radelta file I/O, codec paths and interleaved plane reads;
+- ImageJ TIFF export keeps pixel planes contiguous and preserves colour maps,
+  with valid TIFF directories for other readers;
+- Bounded batched plane reads decode independent volumes/chunks in parallel,
+  used automatically by ImageJ full-memory loading and Python full-plane reads.
+
 ## 0.8.1
 
 - **fix:** TIFF pages with several planar (`PlanarConfiguration=2`) samples

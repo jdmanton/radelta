@@ -125,6 +125,17 @@ class ArrayTests(unittest.TestCase):
 
 
 class FileTests(unittest.TestCase):
+    def test_batched_plane_boundaries_and_reverse_tcz_selections(self):
+        image = (np.arange(3 * 3 * 17 * 7 * 9, dtype=np.uint16)
+                 .reshape(3, 3, 17, 7, 9) * 13)
+        path = self.root / "batches.rdlt"
+        radelta.write(path, image, axes="tczyx", memory_mib=1)
+        for budget in (0, 1, None):
+            with radelta.open(path, cache_mib=budget) as source:
+                for key in (Ellipsis, (slice(None, None, -1), slice(None, None, -1),
+                                      slice(None, None, -2)), (1, slice(None), 7)):
+                    np.testing.assert_array_equal(source[key], image[key])
+
     def test_interleaved_channel_reads_with_default_and_explicit_cache_budgets(self):
         image = np.arange(3 * 4 * 7 * 9, dtype=np.uint16).reshape(3, 4, 7, 9)
         path = self.root / "channels.rdlt"

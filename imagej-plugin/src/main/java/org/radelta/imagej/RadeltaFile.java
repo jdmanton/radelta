@@ -1,6 +1,7 @@
 package org.radelta.imagej;
 
 import com.sun.jna.Pointer;
+import com.sun.jna.Memory;
 import com.sun.jna.ptr.PointerByReference;
 
 import java.io.Closeable;
@@ -11,6 +12,7 @@ import java.nio.file.Paths;
 
 final class RadeltaFile implements Closeable {
     private Pointer handle;
+    private Memory batchBuffer;
     final Path sourcePath;
     final int width, height, slices, channels, frames;
     final int format, flags;
@@ -83,6 +85,42 @@ final class RadeltaFile implements Closeable {
         return pixels;
     }
 
+    /** Read TCZ triples into independently owned Java plane arrays. */
+    synchronized short[][] readPlanes(int[] tcz) throws IOException {
+        if (handle == null) throw new IOException("Radelta file is closed");
+        if (tcz.length % 3 != 0) throw new IllegalArgumentException("Expected TCZ triples");
+        final int count = tcz.length / 3;
+        final int plane = Math.multiplyExact(width, height);
+        final short[][] result = new short[count][];
+        if (count == 0) return result;
+        if (count == 1) {
+            result[0] = readPlane(tcz[0], tcz[1], tcz[2]);
+            return result;
+        }
+        final long voxels = Math.multiplyExact((long) plane, count);
+        final long bytes = Math.multiplyExact(voxels, 2L);
+        if (batchBuffer == null || batchBuffer.size() < bytes) {
+            if (batchBuffer != null) batchBuffer.close();
+            batchBuffer = null;
+            batchBuffer = new Memory(bytes);
+        }
+        int rc = RadeltaNative.api().radelta_file_read_planes_u16(handle, count, tcz, batchBuffer, voxels);
+        if (rc != RadeltaNative.OK) {
+            throw new IOException("Radelta decode failed: " + RadeltaNative.lastError());
+        }
+        for (int i = 0; i < count; ++i) {
+            result[i] = new short[plane];
+            batchBuffer.read((long) i * plane * 2L, result[i], 0, plane);
+        }
+        return result;
+    }
+
+    /** Bound the extra native transfer buffer to 64 MiB and tiny-plane batches
+     * to 128 entries. A single larger plane uses the existing one-plane path. */
+    int loadBatchSize() {
+        return (int) Math.max(1L, Math.min(128L, (64L << 20) / ((long) width * height * 2L)));
+    }
+
     int planeCount() {
         return Math.multiplyExact(Math.multiplyExact(channels, slices), frames);
     }
@@ -98,6 +136,10 @@ final class RadeltaFile implements Closeable {
 
     @Override
     public synchronized void close() {
+        if (batchBuffer != null) {
+            batchBuffer.close();
+            batchBuffer = null;
+        }
         if (handle != null) {
             RadeltaNative.api().radelta_file_close(handle);
             handle = null;

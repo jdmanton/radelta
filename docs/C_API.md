@@ -85,6 +85,25 @@ radelta_file_close
 
 For streaming files, only the chunk containing the requested plane is decoded and cached.
 
+For multiple planes, use:
+
+```c
+radelta_file_read_planes_u16(handle, count, tcz, output, output_capacity_voxels);
+```
+
+`tcz` contains `3 * count` unsigned 32-bit coordinates in the order
+`[t0,c0,z0,t1,c1,z1,...]`. Output contains `count` consecutive `nx * ny` planes
+in that same order; repeated coordinates are supported. Missing volumes/chunks
+decode once per call, in parallel using the shared Rayon pool. Rust callers can
+use `RadeltaFileHandle::read_planes(&[(t,c,z), ...], &mut pixels)`.
+
+Each call admits up to 256 MiB of additional decoded pixels plus compressed
+payloads, or one larger unit. Retained cache data, codec scratch and caller output
+are separate. Empty requests succeed and allow null coordinate/output pointers.
+Invalid coordinates or insufficient capacity leave output untouched; decode/I/O
+errors can leave partial output. The handle and input/output buffers must not
+overlap, and the handle must remain open until the call returns.
+
 Format identifiers returned by `radelta_file_info.format` are:
 
 ```text

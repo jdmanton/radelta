@@ -140,13 +140,25 @@ class Dataset:
             if output.size:
                 full_xy = (self._h5 is None and ranges[3] == range(self._dims[-2])
                            and ranges[4] == range(self._dims[-1]))
-                for ot, oc, oz in np.ndindex(output.shape[:3]):
-                    if full_xy:
-                        plane = output[ot, oc, oz]
-                        check_file(library().radelta_file_read_plane_u16(
-                            self._handle, ranges[0][ot], ranges[1][oc], ranges[2][oz],
-                            pixel_pointer(plane), plane.size))
-                    else:
+                if full_xy:
+                    # Decode independent units together, directly into the
+                    # final contiguous output. Bound coordinate lists and the
+                    # amount of output covered by one call; keep HDF5 and XY
+                    # crops on their existing region-reading paths.
+                    planes = output.reshape((-1, *output.shape[-2:]))
+                    plane_bytes = planes.shape[1] * planes.shape[2] * 2
+                    batch = max(1, min(128, (64 << 20) // plane_bytes))
+                    indices = np.ndindex(output.shape[:3])
+                    for first in range(0, len(planes), batch):
+                        coords = np.asarray([(ranges[0][t], ranges[1][c], ranges[2][z])
+                                             for t, c, z in itertools.islice(indices, batch)],
+                                            dtype=np.uint32)
+                        block = planes[first:first+len(coords)]
+                        check_file(library().radelta_file_read_planes_u16(
+                            self._handle, len(coords), coords.ctypes.data_as(ct.POINTER(ct.c_uint32)),
+                            pixel_pointer(block), block.size))
+                else:
+                    for ot, oc, oz in np.ndindex(output.shape[:3]):
                         output[ot, oc, oz] = self._plane(ranges[0][ot], ranges[1][oc], ranges[2][oz],
                                                        ranges[3], ranges[4])
             order = ["tczyx".index(a) for a in self.axes] + [i for i, a in enumerate("tczyx") if a not in self.axes]

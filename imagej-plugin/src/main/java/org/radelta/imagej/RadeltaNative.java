@@ -34,6 +34,8 @@ final class RadeltaNative {
         int radelta_file_get_info(Pointer handle, FileInfo outInfo);
         int radelta_file_read_plane_u16(Pointer handle, int t, int c, int z,
                                         short[] output, long outputCapacityVoxels);
+        int radelta_file_read_planes_u16(Pointer handle, long count, int[] tcz,
+                                         Pointer output, long outputCapacityVoxels);
 
         int radelta_writer_create_lossless_u16(String pathUtf8,
                                                int nx, int ny, int nz, int nc, int nt,

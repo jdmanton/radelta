@@ -14,6 +14,7 @@ use super::{
     STREAM_MAGIC_LOSSY, STREAM_VERSION, VERSION,
 };
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::ffi::CStr;
 use std::fs::File;
@@ -76,6 +77,10 @@ struct ChunkSegment {
 /// A single oversized entry is still retained, as in the original reader.
 pub const DEFAULT_FILE_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 128;
+// Additional decoded pixels plus compressed payloads admitted by one batch.
+// Codec scratch and the existing retention cache are separate; one oversized
+// unit must always be able to proceed.
+const BATCH_WORKING_BYTES: u64 = 256 * 1024 * 1024;
 
 struct CachedPixels {
     key: usize,
@@ -151,6 +156,12 @@ impl PixelCache {
         }
     }
     fn insert(&mut self, key: usize, pixels: Vec<u16>) {
+        // A batch and another reader can finish decoding the same key. Keep
+        // one retained copy and account for its actual allocation capacity.
+        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
+            self.bytes -=
+                self.entries.remove(index).unwrap().pixels.capacity() * std::mem::size_of::<u16>();
+        }
         let bytes = pixels.capacity() * std::mem::size_of::<u16>();
         self.prepare(bytes);
         self.bytes += bytes;
@@ -192,6 +203,91 @@ enum FileBacking {
         chunks_per_volume: usize,
         cache: PixelCache,
     },
+}
+
+#[derive(Clone, Copy)]
+struct DecodeUnit {
+    key: usize,
+    segment: Segment,
+    z0: usize,
+    depth: usize,
+    context: &'static str,
+}
+
+struct PlaneBatch<'a> {
+    unit: DecodeUnit,
+    targets: Vec<(usize, &'a mut [u16])>,
+}
+
+fn stream_chunk_key(
+    chunks: &[ChunkSegment],
+    chunk_z: usize,
+    chunks_per_volume: usize,
+    d: Dims5,
+    t: usize,
+    c: usize,
+    z: usize,
+) -> std::result::Result<usize, String> {
+    let key = (t * d.c + c) * chunks_per_volume + z / chunk_z;
+    let matches = |ch: &ChunkSegment| ch.t == t && ch.c == c && z >= ch.z0 && z < ch.z0 + ch.depth;
+    if chunks.get(key).is_some_and(matches) {
+        Ok(key)
+    } else {
+        chunks
+            .iter()
+            .position(matches)
+            .ok_or_else(|| "could not locate requested streaming Radelta chunk".into())
+    }
+}
+
+fn decode_unit(
+    backing: &FileBacking,
+    d: Dims5,
+    t: usize,
+    c: usize,
+    z: usize,
+) -> std::result::Result<DecodeUnit, String> {
+    Ok(match backing {
+        FileBacking::Single { len, .. } => DecodeUnit {
+            key: 0,
+            segment: Segment {
+                offset: 0,
+                len: *len,
+            },
+            z0: 0,
+            depth: d.z,
+            context: "Radelta volume",
+        },
+        FileBacking::Nd { streams, .. } => {
+            let key = t * d.c + c;
+            DecodeUnit {
+                key,
+                segment: streams[key],
+                z0: 0,
+                depth: d.z,
+                context: "RDM2/RDQ2 substream",
+            }
+        }
+        FileBacking::Stream {
+            chunks,
+            chunk_z,
+            chunks_per_volume,
+            ..
+        } => {
+            let key = stream_chunk_key(chunks, *chunk_z, *chunks_per_volume, d, t, c, z)?;
+            let ch = chunks[key];
+            DecodeUnit {
+                key,
+                segment: Segment {
+                    offset: ch.offset,
+                    len: ch.len,
+                },
+                z0: ch.z0,
+                depth: ch.depth,
+                context: "RDS3/RQS3 chunk",
+            }
+        }
+    })
 }
 
 pub struct RadeltaFileHandle {
@@ -710,16 +806,7 @@ impl RadeltaFileHandle {
                 chunks_per_volume,
                 cache,
             } => {
-                let mut key = (t * d.c + c) * *chunks_per_volume + z / *chunk_z;
-                let valid = chunks
-                    .get(key)
-                    .is_some_and(|ch| ch.t == t && ch.c == c && z >= ch.z0 && z < ch.z0 + ch.depth);
-                if !valid {
-                    key = chunks
-                        .iter()
-                        .position(|ch| ch.t == t && ch.c == c && z >= ch.z0 && z < ch.z0 + ch.depth)
-                        .ok_or("could not locate requested streaming Radelta chunk")?;
-                }
+                let key = stream_chunk_key(chunks, *chunk_z, *chunks_per_volume, d, t, c, z)?;
                 let ch = chunks[key];
                 cache.note_read(key, z);
                 if !cache.contains(key) {
@@ -748,6 +835,139 @@ impl RadeltaFileHandle {
                 let local_z = z - ch.z0;
                 let start = local_z * plane;
                 out[..plane].copy_from_slice(&pixels[start..start + plane]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Read TCZ coordinates into consecutive planes in the requested order.
+    /// Repeated coordinates are supported. Each missing volume/chunk is decoded
+    /// once per call, using the current Rayon pool across independent units as
+    /// well as codec blocks. Additional in-flight pixels and compressed payloads
+    /// are bounded to 256 MiB per call, except for one oversized unit. The cache
+    /// budget is unchanged. On a decode/I/O error, output may be partly written.
+    pub fn read_planes(
+        &self,
+        planes: &[(usize, usize, usize)],
+        out: &mut [u16],
+    ) -> std::result::Result<(), String> {
+        use rayon::prelude::*;
+        let d = self.dims;
+        let plane = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
+        let needed = planes
+            .len()
+            .checked_mul(plane)
+            .ok_or("plane count overflow")?;
+        if out.len() < needed {
+            return Err("output plane buffer is too small".into());
+        }
+        if planes
+            .iter()
+            .any(|&(t, c, z)| t >= d.t || c >= d.c || z >= d.z)
+        {
+            return Err("requested T/C/Z plane is out of range".into());
+        }
+        if planes.is_empty() {
+            return Ok(());
+        }
+        if let &[(t, c, z)] = planes {
+            return self.read_plane(t, c, z, out);
+        }
+        let mut jobs: Vec<PlaneBatch<'_>> = Vec::new();
+        {
+            let mut backing = self
+                .backing
+                .lock()
+                .map_err(|_| "Radelta file handle mutex is poisoned")?;
+            let mut index = HashMap::new();
+            for (&(t, c, z), dst) in planes.iter().zip(out[..needed].chunks_exact_mut(plane)) {
+                let unit = decode_unit(&backing, d, t, c, z)?;
+                let cached = match &mut *backing {
+                    FileBacking::Single { cache, .. } => cache.as_deref(),
+                    FileBacking::Nd { cache, .. } | FileBacking::Stream { cache, .. } => {
+                        cache.note_read(unit.key, z);
+                        cache.get(unit.key)
+                    }
+                };
+                let start = (z - unit.z0) * plane;
+                if let Some(pixels) = cached {
+                    dst.copy_from_slice(&pixels[start..start + plane]);
+                } else {
+                    let i = *index.entry(unit.key).or_insert_with(|| {
+                        jobs.push(PlaneBatch {
+                            unit,
+                            targets: Vec::new(),
+                        });
+                        jobs.len() - 1
+                    });
+                    jobs[i].targets.push((start, dst));
+                }
+            }
+        }
+        // Limit each wave by both memory and pool width. Nested codec work
+        // shares this pool: no extra OS threads or nested thread pools.
+        let mut jobs = jobs.into_iter().peekable();
+        let workers = rayon::current_num_threads();
+        while jobs.peek().is_some() {
+            let mut bytes = 0u64;
+            let mut wave = Vec::new();
+            while wave.len() < workers {
+                let Some(job) = jobs.peek() else { break };
+                let size = (plane as u64)
+                    .checked_mul(job.unit.depth as u64)
+                    .and_then(|n| n.checked_mul(2))
+                    .and_then(|n| n.checked_add(job.unit.segment.len))
+                    .ok_or("batch working size overflow")?;
+                if !wave.is_empty() && size > BATCH_WORKING_BYTES.saturating_sub(bytes) {
+                    break;
+                }
+                bytes = bytes
+                    .checked_add(size)
+                    .ok_or("batch working size overflow")?;
+                wave.push(jobs.next().unwrap());
+            }
+            wave.into_par_iter()
+                .try_for_each(|job| self.read_batch(job))?;
+        }
+        Ok(())
+    }
+
+    fn read_batch(&self, job: PlaneBatch<'_>) -> std::result::Result<(), String> {
+        let unit = job.unit;
+        let payload = {
+            let mut backing = self
+                .backing
+                .lock()
+                .map_err(|_| "Radelta file handle mutex is poisoned")?;
+            let file = match &mut *backing {
+                FileBacking::Single { file, .. }
+                | FileBacking::Nd { file, .. }
+                | FileBacking::Stream { file, .. } => file,
+            };
+            read_payload(file, unit.segment)?
+        };
+        let pixels = decompress_u16_expecting(
+            &payload,
+            Dims {
+                x: self.dims.x,
+                y: self.dims.y,
+                z: unit.depth,
+            },
+        )
+        .map_err(|e| format!("{}: {e}", unit.context))?;
+        drop(payload);
+        for (start, dst) in job.targets {
+            dst.copy_from_slice(&pixels[start..start + dst.len()]);
+        }
+        let mut backing = self
+            .backing
+            .lock()
+            .map_err(|_| "Radelta file handle mutex is poisoned")?;
+        match &mut *backing {
+            FileBacking::Single { cache, .. } => *cache = Some(pixels),
+            FileBacking::Nd { cache, .. } | FileBacking::Stream { cache, .. } => {
+                cache.prepare_read(pixels.capacity() * std::mem::size_of::<u16>());
+                cache.insert(unit.key, pixels);
             }
         }
         Ok(())
@@ -1058,6 +1278,66 @@ pub unsafe extern "C" fn radelta_file_read_plane_u16(
     }
     let out = std::slice::from_raw_parts_mut(output, plane);
     match h.read_plane(t as usize, c as usize, z as usize, out) {
+        Ok(()) => RADELTA_OK,
+        Err(e) => {
+            set_last_error(e);
+            RADELTA_CODEC_ERROR
+        }
+    }
+}
+
+/// Read TCZ triples into consecutive output planes, in request order.
+/// Invalid coordinates/capacity are rejected before writing output. Decode/I/O
+/// errors may leave partially written output. An empty request is a no-op.
+///
+/// # Safety
+/// `handle` must be live. For nonzero `count`, `tcz` references `3 * count`
+/// readable `u32` values and `output` at least `output_capacity_voxels` writable
+/// `u16` values. These buffers must not overlap each other or the handle.
+#[no_mangle]
+pub unsafe extern "C" fn radelta_file_read_planes_u16(
+    handle: *const RadeltaFileHandle,
+    count: u64,
+    tcz: *const u32,
+    output: *mut u16,
+    output_capacity_voxels: u64,
+) -> i32 {
+    if handle.is_null() {
+        return RADELTA_INVALID_ARGUMENT;
+    }
+    if count == 0 {
+        return RADELTA_OK;
+    }
+    let h = &*handle;
+    let sizes = usize::try_from(count).ok().and_then(|count| {
+        let coords = count.checked_mul(3)?;
+        let voxels = h.dims.x.checked_mul(h.dims.y)?.checked_mul(count)?;
+        (coords <= isize::MAX as usize / std::mem::size_of::<u32>()
+            && voxels <= isize::MAX as usize / std::mem::size_of::<u16>())
+        .then_some((count, coords, voxels))
+    });
+    let Some((count, coords, voxels)) = sizes else {
+        set_last_error("batch size exceeds platform limits");
+        return RADELTA_INVALID_ARGUMENT;
+    };
+    if tcz.is_null() || output.is_null() || output_capacity_voxels < voxels as u64 {
+        set_last_error("invalid batch buffers or output capacity");
+        return RADELTA_INVALID_ARGUMENT;
+    }
+    let mut planes = Vec::new();
+    if planes.try_reserve_exact(count).is_err() {
+        set_last_error("cannot allocate plane coordinates");
+        return RADELTA_CODEC_ERROR;
+    }
+    for &[t, c, z] in std::slice::from_raw_parts(tcz, coords).as_chunks::<3>().0 {
+        if t as usize >= h.dims.t || c as usize >= h.dims.c || z as usize >= h.dims.z {
+            set_last_error("requested T/C/Z plane is out of range");
+            return RADELTA_INVALID_ARGUMENT;
+        }
+        planes.push((t as usize, c as usize, z as usize));
+    }
+    let out = std::slice::from_raw_parts_mut(output, voxels);
+    match h.read_planes(&planes, out) {
         Ok(()) => RADELTA_OK,
         Err(e) => {
             set_last_error(e);
@@ -1752,5 +2032,263 @@ mod tests {
         }
         drop(handle);
         let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn batch_reads_match_all_container_variants_and_cache_budgets() {
+        let d = Dims5 {
+            x: 73,
+            y: 61,
+            z: 9,
+            c: 2,
+            t: 2,
+        };
+        let plane = d.x * d.y;
+        let original: Vec<u16> = (0..d.voxels().unwrap())
+            .map(|i| ((i * 17 + i / plane * 37) % 50000) as u16)
+            .collect();
+        let path = temp_path("batch-containers");
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        for lossy in [false, true] {
+            for kind in 0..3 {
+                let dims = if kind == 0 {
+                    Dims5 { c: 1, t: 1, ..d }
+                } else {
+                    d
+                };
+                if kind == 2 {
+                    let mode = if lossy {
+                        WriterMode::Lossy(LossyOptions::default())
+                    } else {
+                        WriterMode::Lossless(Options::default())
+                    };
+                    let mut writer = RadeltaStreamWriter::new(path.clone(), dims, mode, 1).unwrap();
+                    for (i, pixels) in original.chunks_exact(plane).enumerate() {
+                        writer
+                            .write_plane(i / (d.c * d.z), i / d.z % d.c, i % d.z, pixels)
+                            .unwrap();
+                    }
+                    writer.finish().unwrap();
+                    let handle = RadeltaFileHandle::open(&path).unwrap();
+                    assert!(
+                        matches!(&*handle.backing.lock().unwrap(), FileBacking::Stream { chunks_per_volume, .. } if *chunks_per_volume > 1)
+                    );
+                } else {
+                    let input = &original[..dims.voxels().unwrap()];
+                    let encoded = match (kind, lossy) {
+                        (0, false) => {
+                            crate::compress_u16(input, dims.volume_dims(), Options::default())
+                        }
+                        (0, true) => crate::compress_lossy_u16(
+                            input,
+                            dims.volume_dims(),
+                            LossyOptions::default(),
+                        ),
+                        (_, false) => crate::compress_u16_nd(input, dims, Options::default()),
+                        (_, true) => {
+                            crate::compress_lossy_u16_nd(input, dims, LossyOptions::default())
+                        }
+                    }
+                    .unwrap();
+                    fs::write(&path, encoded).unwrap();
+                }
+                // Establish the reconstruction independently through single reads,
+                // including lossy quantization, then reverse/repeat ImageJ order.
+                let single = RadeltaFileHandle::open(&path).unwrap();
+                let coords: Vec<_> = (0..dims.t)
+                    .flat_map(|t| {
+                        (0..dims.z).flat_map(move |z| (0..dims.c).map(move |c| (t, c, z)))
+                    })
+                    .collect();
+                let mut expected = vec![0; coords.len() * plane];
+                for (&(t, c, z), dst) in coords.iter().zip(expected.chunks_exact_mut(plane)) {
+                    single.read_plane(t, c, z, dst).unwrap();
+                }
+                drop(single);
+                for budget in [0, 1, DEFAULT_FILE_CACHE_BYTES] {
+                    let reader = RadeltaFileHandle::open(&path).unwrap();
+                    reader.set_cache_limit(budget).unwrap();
+                    let request: Vec<_> = coords
+                        .iter()
+                        .copied()
+                        .rev()
+                        .chain(coords.iter().copied())
+                        .collect();
+                    for batch in [1, 3, 11, request.len()] {
+                        let mut done = 0;
+                        for group in request.chunks(batch) {
+                            let mut out = vec![65535; group.len() * plane + 1];
+                            pool.install(|| reader.read_planes(group, &mut out))
+                                .unwrap();
+                            for (i, &(t, c, z)) in group.iter().enumerate() {
+                                let index = (t * dims.z + z) * dims.c + c;
+                                assert_eq!(
+                                    &out[i * plane..(i + 1) * plane],
+                                    &expected[index * plane..(index + 1) * plane],
+                                    "kind={kind}, lossy={lossy}, budget={budget}, index={}",
+                                    done + i
+                                );
+                            }
+                            assert_eq!(out[group.len() * plane], 65535, "tail overwritten");
+                            done += group.len();
+                        }
+                    }
+                    let mut sentinel = vec![17; 2 * plane];
+                    assert!(reader
+                        .read_planes(&[(0, 0, 0), (0, 0, dims.z)], &mut sentinel)
+                        .is_err());
+                    assert!(sentinel.iter().all(|&p| p == 17));
+                    assert!(reader
+                        .read_planes(&[(0, 0, 0), (0, 0, 0)], &mut sentinel[..plane])
+                        .is_err());
+                    reader.read_planes(&[], &mut []).unwrap();
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn batch_c_api_rejects_invalid_sizes_and_coordinates_without_writing() {
+        let path = temp_path("batch-ffi");
+        fs::write(
+            &path,
+            crate::compress_u16(&[3, 4], Dims { x: 2, y: 1, z: 1 }, Options::default()).unwrap(),
+        )
+        .unwrap();
+        let handle = RadeltaFileHandle::open(&path).unwrap();
+        let coords = [0, 0, 0, 0, 0, 1];
+        let mut output = [19u16; 4];
+        unsafe {
+            assert_eq!(
+                radelta_file_read_planes_u16(&handle, 0, ptr::null(), ptr::null_mut(), 0),
+                RADELTA_OK
+            );
+            for (count, input, capacity) in [
+                (u64::MAX, coords.as_ptr(), u64::MAX),
+                (2, coords.as_ptr(), 3),
+                (2, coords.as_ptr(), 4),
+                (1, ptr::null(), 4),
+            ] {
+                assert_eq!(
+                    radelta_file_read_planes_u16(
+                        &handle,
+                        count,
+                        input,
+                        output.as_mut_ptr(),
+                        capacity
+                    ),
+                    RADELTA_INVALID_ARGUMENT
+                );
+                assert_eq!(output, [19; 4]);
+            }
+            assert_eq!(
+                radelta_file_read_planes_u16(&handle, 1, coords.as_ptr(), output.as_mut_ptr(), 4),
+                RADELTA_OK
+            );
+            assert_eq!(output, [3, 4, 19, 19]);
+        }
+        drop(handle);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_batch_and_single_reads_keep_one_cached_copy() {
+        let d = Dims5 {
+            x: 32,
+            y: 17,
+            z: 7,
+            c: 3,
+            t: 2,
+        };
+        let data: Vec<_> = (0..d.voxels().unwrap()).map(|i| (i * 31) as u16).collect();
+        let path = temp_path("batch-concurrent");
+        fs::write(
+            &path,
+            crate::compress_u16_nd(&data, d, Options::default()).unwrap(),
+        )
+        .unwrap();
+        let reader = RadeltaFileHandle::open(&path).unwrap();
+        let plane = d.x * d.y;
+        std::thread::scope(|s| {
+            for worker in 0..4 {
+                let (reader, data) = (&reader, &data);
+                s.spawn(move || {
+                    for i in 0..12 {
+                        let c = (i + worker) % d.c;
+                        let coords = [(i % d.t, c, i % d.z), (0, c, 0), (i % d.t, c, i % d.z)];
+                        let mut out = vec![0; 3 * plane];
+                        if worker == 0 {
+                            for (&(t, c, z), dst) in coords.iter().zip(out.chunks_exact_mut(plane))
+                            {
+                                reader.read_plane(t, c, z, dst).unwrap();
+                            }
+                        } else {
+                            reader.read_planes(&coords, &mut out).unwrap();
+                        }
+                        for (j, &(t, c, z)) in coords.iter().enumerate() {
+                            let start = ((t * d.c + c) * d.z + z) * plane;
+                            assert_eq!(
+                                &out[j * plane..(j + 1) * plane],
+                                &data[start..start + plane]
+                            );
+                        }
+                    }
+                });
+            }
+        });
+        let backing = reader.backing.lock().unwrap();
+        let FileBacking::Nd { cache, .. } = &*backing else {
+            panic!()
+        };
+        let keys: std::collections::HashSet<_> = cache.entries.iter().map(|e| e.key).collect();
+        assert_eq!(keys.len(), cache.entries.len());
+        assert_eq!(
+            cache.bytes,
+            cache.entries.iter().map(|e| e.pixels.capacity() * 2).sum()
+        );
+        drop(backing);
+        drop(reader);
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn failed_batch_decode_does_not_poison_other_reads() {
+        let d = Dims5 {
+            x: 7,
+            y: 5,
+            z: 2,
+            c: 2,
+            t: 1,
+        };
+        let data: Vec<_> = (0..d.voxels().unwrap()).map(|i| (i * 23) as u16).collect();
+        let path = temp_path("batch-damaged");
+        fs::write(
+            &path,
+            crate::compress_u16_nd(&data, d, Options::default()).unwrap(),
+        )
+        .unwrap();
+        let reader = RadeltaFileHandle::open(&path).unwrap();
+        let segment = {
+            let backing = reader.backing.lock().unwrap();
+            let FileBacking::Nd { streams, .. } = &*backing else {
+                panic!()
+            };
+            streams[1]
+        };
+        drop(reader);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[(segment.offset + segment.len - 1) as usize] ^= 1;
+        fs::write(&path, bytes).unwrap();
+        let reader = RadeltaFileHandle::open(&path).unwrap();
+        let mut out = vec![0; d.x * d.y * 2];
+        assert!(reader
+            .read_planes(&[(0, 0, 0), (0, 1, 0)], &mut out)
+            .is_err());
+        reader.read_plane(0, 0, 1, &mut out).unwrap();
+        assert_eq!(&out[..35], &data[35..70]);
+        drop(reader);
+        fs::remove_file(path).unwrap();
     }
 }
