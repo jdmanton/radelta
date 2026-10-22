@@ -37,7 +37,9 @@ pub use ffi::{
     radelta_set_metadata_limit, RADELTA_BUFFER_TOO_SMALL, RADELTA_CODEC_ERROR,
     RADELTA_INVALID_ARGUMENT, RADELTA_OK,
 };
-pub use file_api::{RadeltaFileHandle, RadeltaFileInfo, DEFAULT_FILE_CACHE_BYTES};
+pub use file_api::{
+    RadeltaFileHandle, RadeltaFileInfo, RadeltaStreamWriter, DEFAULT_FILE_CACHE_BYTES,
+};
 
 const MAGIC: &[u8; 4] = b"RDL1";
 const MAGIC_LOSSY: &[u8; 4] = b"RDLQ";
@@ -322,7 +324,8 @@ impl Dims5 {
 /// This is an implementation heuristic shared by the CLI and file-writer API,
 /// not part of the serialized format. Roughly one quarter of `memory_mib` is
 /// reserved for raw uint16 pixels; the rest is left for q arrays, models and
-/// encoded output.
+/// encoded output. The pipelined writer applies this base heuristic to each
+/// share of its bounded working set; this is not a hard process-RSS limit.
 #[doc(hidden)]
 pub fn choose_stream_chunk_depth(
     dims: Dims5,

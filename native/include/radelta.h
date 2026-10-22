@@ -222,7 +222,11 @@ int32_t radelta_file_read_planes_u16(
  *
  * The writer always emits chunked out-of-core containers (RDS3 or RQS3) and
  * accepts input as sequential TCZ planes. Callers must provide planes in
- * increasing T,C,Z order. Memory use is bounded by the selected RAM budget.
+ * increasing T,C,Z order. Background compression and ordered writes use a
+ * bounded queue within the approximate working-memory allowance. Model/scratch
+ * allocations and metadata are additional; a minimum chunk may exceed it.
+ * Plane data are copied before write returns. Deferred errors can surface on
+ * later writes or finish; callers must check finish. Close joins queued work.
  * Pixels and metadata are staged in a sibling temporary file. Only successful
  * finish creates/replaces the destination; close discards unfinished output.
  * ------------------------------------------------------------------------- */

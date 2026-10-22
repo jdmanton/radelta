@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.4
+
+- Streaming TIFF/Radelta pipelines overlap reading, compression and ordered
+  output, with bounded queues, reusable buffers and joined workers on failures;
+- TIFF export uses bounded batch read-ahead and accepts `decode --memory-mib`.
+
+## 0.8.3
+
+- Raise the TIFF decoder buffer allowance for large XY planes.
+
 ## 0.8.2
 
 - Faster TIFF and Radelta file I/O, codec paths and interleaved plane reads;

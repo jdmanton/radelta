@@ -302,17 +302,26 @@ pub struct RadeltaWriterHandle {
     writer: RadeltaStreamWriter,
 }
 
+#[derive(Clone, Copy)]
 enum WriterMode {
     Lossless(Options),
     Lossy(LossyOptions),
 }
 
-struct RadeltaStreamWriter {
+/// Bounded streaming encoder shared by the CLI and file-writer C ABI.
+/// Queued chunks retain their order; `finish` waits for every compression job
+/// before appending metadata and publishing the completed file.
+pub struct RadeltaStreamWriter {
     dims: Dims5,
     plane_voxels: usize,
     chunk_z: usize,
     expected_chunks: u64,
     written_chunks: u64,
+    payload_bytes: usize,
+    raw_bytes: usize,
+    pending: VecDeque<std::sync::mpsc::Receiver<std::result::Result<EncodedChunk, String>>>,
+    pending_limit: usize,
+    failed: Option<String>,
     next_t: usize,
     next_c: usize,
     next_z: usize,
@@ -325,6 +334,100 @@ struct RadeltaStreamWriter {
     pending_output: crate::output::PendingOutput,
     finished: bool,
     metadata: Vec<u8>,
+}
+
+struct EncodedChunk {
+    t: usize,
+    c: usize,
+    z0: usize,
+    depth: usize,
+    pixels: Vec<u16>,
+    payload: Vec<u8>,
+}
+
+fn wait_chunk(
+    receiver: std::sync::mpsc::Receiver<std::result::Result<EncodedChunk, String>>,
+) -> std::result::Result<EncodedChunk, String> {
+    // A Rust caller can feed/finish a writer from a Rayon worker, including a
+    // one-thread pool. Cooperate with that pool instead of blocking its worker.
+    if rayon::current_thread_index().is_some() {
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err("compression worker disconnected".into())
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    rayon::yield_now();
+                    std::thread::yield_now();
+                }
+            }
+        }
+    }
+    receiver
+        .recv()
+        .map_err(|_| "compression worker disconnected")?
+}
+
+/// Divide the existing approximate working budget between encode slots.
+/// Four raw-chunk sizes per slot cover input buffers,
+/// completed payloads and an estimate of codec working memory. Recycle each
+/// completed input into the feeder. Keep enough codec blocks in a chunk to
+/// amortize models; use additional slots for naturally shallow chunks.
+fn stream_pipeline_plan(
+    d: Dims5,
+    memory_mib: usize,
+    block: usize,
+    threads: usize,
+) -> std::result::Result<(usize, usize), String> {
+    let serial = choose_stream_chunk_depth(d, memory_mib, block).map_err(|e| e.to_string())?;
+    let budget = memory_mib
+        .checked_mul(1024 * 1024)
+        .ok_or("memory budget overflow")?;
+    let plane =
+        d.x.checked_mul(d.y)
+            .and_then(|n| n.checked_mul(2))
+            .ok_or("plane size overflow")?;
+    let threads = threads.max(1);
+    let block = block.max(1);
+    let parallel_units = threads.div_ceil(serial.div_ceil(block)).clamp(1, 8);
+    for pending in (1..=parallel_units).rev() {
+        let depth = choose_stream_chunk_depth(d, memory_mib / pending, block)
+            .map_err(|e| e.to_string())?
+            .min(block.saturating_mul(threads));
+        // Parallelize naturally shallow units, rather than subdividing a
+        // memory-limited unit into many separately modelled chunks.
+        if pending > 1 && depth < serial.min(block.saturating_mul(threads)) {
+            continue;
+        }
+        if depth < block.min(d.z) && serial >= block.min(d.z) {
+            continue;
+        }
+        if pending > threads.div_ceil(depth.div_ceil(block)) {
+            continue;
+        }
+        if d.t * d.c * d.z.div_ceil(depth) < 2 {
+            continue;
+        }
+        let fits = plane
+            .checked_mul(depth)
+            .and_then(|n| n.checked_mul(4))
+            .and_then(|n| n.checked_mul(pending))
+            .is_some_and(|n| n <= budget);
+        if fits {
+            return Ok((depth, pending));
+        }
+    }
+    Ok((serial, 0))
+}
+
+impl Drop for RadeltaStreamWriter {
+    fn drop(&mut self) {
+        // No codec task may outlive a closed/failed/unfinished writer.
+        for receiver in self.pending.drain(..) {
+            let _ = wait_chunk(receiver);
+        }
+    }
 }
 
 fn read_exact_array<const N: usize>(file: &mut File) -> std::io::Result<[u8; N]> {
@@ -711,6 +814,20 @@ impl RadeltaFileHandle {
         &self.metadata
     }
 
+    /// Nominal Z depth decoded by one indexed read. The final streaming chunk
+    /// in a volume can be shorter. Useful for avoiding batches that cannot
+    /// expose parallelism across stored units.
+    pub fn decode_unit_depth(&self) -> std::result::Result<usize, String> {
+        let backing = self
+            .backing
+            .lock()
+            .map_err(|_| "Radelta file handle mutex is poisoned")?;
+        Ok(match &*backing {
+            FileBacking::Stream { chunk_z, .. } => *chunk_z,
+            FileBacking::Single { .. } | FileBacking::Nd { .. } => self.dims.z,
+        })
+    }
+
     pub fn info(&self) -> RadeltaFileInfo {
         RadeltaFileInfo {
             nx: self.dims.x as u32,
@@ -851,6 +968,18 @@ impl RadeltaFileHandle {
         planes: &[(usize, usize, usize)],
         out: &mut [u16],
     ) -> std::result::Result<(), String> {
+        self.read_planes_with_budget(planes, out, BATCH_WORKING_BYTES)
+    }
+
+    /// Batched reads with a caller-selected in-flight pixel/payload allowance.
+    /// Codec scratch, retained cache and caller output are separate; one unit
+    /// larger than the allowance still proceeds. The C ABI keeps its default.
+    pub fn read_planes_with_budget(
+        &self,
+        planes: &[(usize, usize, usize)],
+        out: &mut [u16],
+        working_bytes: u64,
+    ) -> std::result::Result<(), String> {
         use rayon::prelude::*;
         let d = self.dims;
         let plane = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
@@ -918,7 +1047,7 @@ impl RadeltaFileHandle {
                     .and_then(|n| n.checked_mul(2))
                     .and_then(|n| n.checked_add(job.unit.segment.len))
                     .ok_or("batch working size overflow")?;
-                if !wave.is_empty() && size > BATCH_WORKING_BYTES.saturating_sub(bytes) {
+                if !wave.is_empty() && size > working_bytes.saturating_sub(bytes) {
                     break;
                 }
                 bytes = bytes
@@ -926,13 +1055,35 @@ impl RadeltaFileHandle {
                     .ok_or("batch working size overflow")?;
                 wave.push(jobs.next().unwrap());
             }
-            wave.into_par_iter()
-                .try_for_each(|job| self.read_batch(job))?;
+            let decoded: std::result::Result<Vec<_>, String> = wave
+                .into_par_iter()
+                .map(|job| self.read_batch(job))
+                .collect();
+            // Retain results in REQUEST order, not worker completion order.
+            // Sequential caching keeps one unit, which must be the trailing
+            // requested unit when the next call continues in the same chunk.
+            let decoded = decoded?;
+            let mut backing = self
+                .backing
+                .lock()
+                .map_err(|_| "Radelta file handle mutex is poisoned")?;
+            for (unit, pixels) in decoded {
+                match &mut *backing {
+                    FileBacking::Single { cache, .. } => *cache = Some(pixels),
+                    FileBacking::Nd { cache, .. } | FileBacking::Stream { cache, .. } => {
+                        cache.prepare_read(pixels.capacity() * std::mem::size_of::<u16>());
+                        cache.insert(unit.key, pixels);
+                    }
+                }
+            }
         }
         Ok(())
     }
 
-    fn read_batch(&self, job: PlaneBatch<'_>) -> std::result::Result<(), String> {
+    fn read_batch(
+        &self,
+        job: PlaneBatch<'_>,
+    ) -> std::result::Result<(DecodeUnit, Vec<u16>), String> {
         let unit = job.unit;
         let payload = {
             let mut backing = self
@@ -959,27 +1110,70 @@ impl RadeltaFileHandle {
         for (start, dst) in job.targets {
             dst.copy_from_slice(&pixels[start..start + dst.len()]);
         }
-        let mut backing = self
-            .backing
-            .lock()
-            .map_err(|_| "Radelta file handle mutex is poisoned")?;
-        match &mut *backing {
-            FileBacking::Single { cache, .. } => *cache = Some(pixels),
-            FileBacking::Nd { cache, .. } | FileBacking::Stream { cache, .. } => {
-                cache.prepare_read(pixels.capacity() * std::mem::size_of::<u16>());
-                cache.insert(unit.key, pixels);
-            }
-        }
-        Ok(())
+        Ok((unit, pixels))
     }
 }
 
 impl RadeltaStreamWriter {
+    pub fn create_lossless(
+        path: impl AsRef<std::path::Path>,
+        dims: Dims5,
+        options: Options,
+        memory_mib: usize,
+    ) -> std::result::Result<Self, String> {
+        Self::new(
+            path.as_ref().to_path_buf(),
+            dims,
+            WriterMode::Lossless(options),
+            memory_mib,
+        )
+    }
+
+    pub fn create_lossy(
+        path: impl AsRef<std::path::Path>,
+        dims: Dims5,
+        options: LossyOptions,
+        memory_mib: usize,
+    ) -> std::result::Result<Self, String> {
+        Self::new(
+            path.as_ref().to_path_buf(),
+            dims,
+            WriterMode::Lossy(options),
+            memory_mib,
+        )
+    }
+
+    pub fn chunk_depth(&self) -> usize {
+        self.chunk_z
+    }
+    pub fn pending_limit(&self) -> usize {
+        self.pending_limit
+    }
+    pub fn chunks_written(&self) -> u64 {
+        self.written_chunks
+    }
+    pub fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+    pub fn raw_bytes_written(&self) -> usize {
+        self.raw_bytes
+    }
+    pub fn set_metadata(&mut self, bytes: Vec<u8>) -> std::result::Result<(), String> {
+        if self.finished {
+            return Err("Radelta writer has already been finished".into());
+        }
+        if bytes.len() > crate::metadata_limit() {
+            return Err("metadata exceeds configured byte limit".into());
+        }
+        self.metadata = bytes;
+        Ok(())
+    }
+
     fn new(
         path: PathBuf,
         dims: Dims5,
         mode: WriterMode,
-        memory_mib: u32,
+        memory_mib: usize,
     ) -> std::result::Result<Self, String> {
         dims.validate().map_err(|e| e.to_string())?;
         let plane_voxels = dims
@@ -1003,12 +1197,12 @@ impl RadeltaStreamWriter {
             }
         };
         let memory_mib = if memory_mib == 0 {
-            DEFAULT_STREAM_MEMORY_MIB as u32
+            DEFAULT_STREAM_MEMORY_MIB
         } else {
             memory_mib
         };
-        let chunk_z = choose_stream_chunk_depth(dims, memory_mib as usize, block_depth)
-            .map_err(|e| e.to_string())?;
+        let (chunk_z, pending_limit) =
+            stream_pipeline_plan(dims, memory_mib, block_depth, rayon::current_num_threads())?;
         let chunks_per_volume = dims.z.div_ceil(chunk_z);
         let expected_chunks = (dims.t as u64)
             .checked_mul(dims.c as u64)
@@ -1036,6 +1230,11 @@ impl RadeltaStreamWriter {
             chunk_z,
             expected_chunks,
             written_chunks: 0,
+            payload_bytes: 0,
+            raw_bytes: 0,
+            pending: VecDeque::new(),
+            pending_limit,
+            failed: None,
             next_t: 0,
             next_c: 0,
             next_z: 0,
@@ -1051,13 +1250,16 @@ impl RadeltaStreamWriter {
         })
     }
 
-    fn write_plane(
+    pub fn write_plane(
         &mut self,
         t: usize,
         c: usize,
         z: usize,
         plane: &[u16],
     ) -> std::result::Result<(), String> {
+        if let Some(e) = &self.failed {
+            return Err(e.clone());
+        }
         if self.finished {
             return Err("Radelta writer has already been finished".into());
         }
@@ -1075,6 +1277,13 @@ impl RadeltaStreamWriter {
             ));
         }
         if self.chunk_pixels.is_empty() {
+            let needed = self
+                .plane_voxels
+                .checked_mul(self.chunk_z)
+                .ok_or("chunk size overflow")?;
+            self.chunk_pixels
+                .try_reserve_exact(needed)
+                .map_err(|_| "cannot allocate Radelta writer chunk buffer")?;
             self.chunk_t = t;
             self.chunk_c = c;
             self.chunk_z0 = z;
@@ -1084,7 +1293,10 @@ impl RadeltaStreamWriter {
         let end_of_volume = z + 1 == self.dims.z;
         self.advance_expected();
         if local_depth == self.chunk_z || end_of_volume {
-            self.flush_chunk()?;
+            if let Err(e) = self.flush_chunk() {
+                self.failed = Some(e.clone());
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -1106,34 +1318,96 @@ impl RadeltaStreamWriter {
             return Ok(());
         }
         let depth = self.chunk_pixels.len() / self.plane_voxels;
-        if depth == 0 {
-            return Ok(());
-        }
-        let d = Dims {
+        let dims = Dims {
             x: self.dims.x,
             y: self.dims.y,
             z: depth,
         };
-        let payload = match self.mode {
-            WriterMode::Lossless(opts) => {
-                compress_u16(&self.chunk_pixels, d, opts).map_err(|e| e.to_string())?
+        let mode = self.mode;
+        let encode = move |pixels: Vec<u16>, t, c, z0| {
+            let payload = match mode {
+                WriterMode::Lossless(o) => compress_u16(&pixels, dims, o),
+                WriterMode::Lossy(o) => compress_lossy_u16(&pixels, dims, o),
             }
-            WriterMode::Lossy(opts) => {
-                compress_lossy_u16(&self.chunk_pixels, d, opts).map_err(|e| e.to_string())?
-            }
+            .map_err(|e| e.to_string())?;
+            Ok(EncodedChunk {
+                t,
+                c,
+                z0,
+                depth,
+                pixels,
+                payload,
+            })
         };
-        write_u32(&mut self.out, self.chunk_t as u32).map_err(|e| e.to_string())?;
-        write_u32(&mut self.out, self.chunk_c as u32).map_err(|e| e.to_string())?;
-        write_u32(&mut self.out, self.chunk_z0 as u32).map_err(|e| e.to_string())?;
-        write_u32(&mut self.out, depth as u32).map_err(|e| e.to_string())?;
-        write_u64(&mut self.out, payload.len() as u64).map_err(|e| e.to_string())?;
-        self.out.write_all(&payload).map_err(|e| e.to_string())?;
-        self.written_chunks += 1;
-        self.chunk_pixels.clear();
+        if self.pending_limit == 0 {
+            let chunk = encode(
+                std::mem::take(&mut self.chunk_pixels),
+                self.chunk_t,
+                self.chunk_c,
+                self.chunk_z0,
+            )?;
+            return self.write_encoded(chunk);
+        }
+        // Wait for the oldest result BEFORE admitting another encode. Its
+        // payload can then be written while the newly submitted chunk compresses.
+        let ready = if self.pending.len() == self.pending_limit {
+            Some(wait_chunk(self.pending.pop_front().unwrap())?)
+        } else {
+            None
+        };
+        let pixels = std::mem::take(&mut self.chunk_pixels);
+        let (t, c, z0) = (self.chunk_t, self.chunk_c, self.chunk_z0);
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        rayon::spawn(move || {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encode(pixels, t, c, z0)))
+                    .unwrap_or_else(|_| Err("Radelta compression worker panicked".into()));
+            let _ = send.send(result);
+        });
+        self.pending.push_back(receive);
+        if let Some(chunk) = ready {
+            self.write_encoded(chunk)?;
+        }
         Ok(())
     }
 
-    fn finish(&mut self) -> std::result::Result<(), String> {
+    fn write_encoded(&mut self, mut chunk: EncodedChunk) -> std::result::Result<(), String> {
+        write_u32(&mut self.out, chunk.t as u32).map_err(|e| e.to_string())?;
+        write_u32(&mut self.out, chunk.c as u32).map_err(|e| e.to_string())?;
+        write_u32(&mut self.out, chunk.z0 as u32).map_err(|e| e.to_string())?;
+        write_u32(&mut self.out, chunk.depth as u32).map_err(|e| e.to_string())?;
+        write_u64(&mut self.out, chunk.payload.len() as u64).map_err(|e| e.to_string())?;
+        self.out
+            .write_all(&chunk.payload)
+            .map_err(|e| e.to_string())?;
+        self.written_chunks += 1;
+        self.payload_bytes += chunk.payload.len();
+        self.raw_bytes += chunk.pixels.len() * 2;
+        chunk.pixels.clear();
+        if self.chunk_pixels.is_empty() && self.chunk_pixels.capacity() < chunk.pixels.capacity() {
+            self.chunk_pixels = chunk.pixels;
+        }
+        Ok(())
+    }
+
+    /// Drain submitted chunks without publishing the file.
+    pub fn flush_pending(&mut self) -> std::result::Result<(), String> {
+        if let Some(e) = &self.failed {
+            return Err(e.clone());
+        }
+        while let Some(receiver) = self.pending.pop_front() {
+            if let Err(e) = wait_chunk(receiver).and_then(|chunk| self.write_encoded(chunk)) {
+                self.failed = Some(e.clone());
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> std::result::Result<(), String> {
+        if let Some(e) = &self.failed {
+            return Err(e.clone());
+        }
         if self.finished {
             return Ok(());
         }
@@ -1143,16 +1417,24 @@ impl RadeltaStreamWriter {
                 self.next_t, self.next_c, self.next_z
             ));
         }
-        self.flush_chunk()?;
+        if let Err(e) = self.flush_chunk() {
+            self.failed = Some(e.clone());
+            return Err(e);
+        }
+        self.flush_pending()?;
         if self.written_chunks != self.expected_chunks {
             return Err(format!(
                 "streaming writer emitted {} chunks, but {} were expected",
                 self.written_chunks, self.expected_chunks
             ));
         }
-        crate::metadata::finish_new_file_metadata(&mut self.out, &self.metadata)
-            .map_err(|e| e.to_string())?;
-        self.pending_output.publish().map_err(|e| e.to_string())?;
+        let result = crate::metadata::finish_new_file_metadata(&mut self.out, &self.metadata)
+            .map_err(|e| e.to_string())
+            .and_then(|()| self.pending_output.publish().map_err(|e| e.to_string()));
+        if let Err(e) = result {
+            self.failed = Some(e.clone());
+            return Err(e);
+        }
         self.finished = true;
         Ok(())
     }
@@ -1384,7 +1666,7 @@ pub unsafe extern "C" fn radelta_writer_create_lossless_u16(
         path,
         dims,
         WriterMode::Lossless(Options::default()),
-        memory_mib,
+        memory_mib as usize,
     ) {
         Ok(writer) => {
             *out_handle = Box::into_raw(Box::new(RadeltaWriterHandle { writer }));
@@ -1444,7 +1726,7 @@ pub unsafe extern "C" fn radelta_writer_create_lossy_u16(
         set_last_error(e.to_string());
         return RADELTA_INVALID_ARGUMENT;
     }
-    match RadeltaStreamWriter::new(path, dims, WriterMode::Lossy(opts), memory_mib) {
+    match RadeltaStreamWriter::new(path, dims, WriterMode::Lossy(opts), memory_mib as usize) {
         Ok(writer) => {
             *out_handle = Box::into_raw(Box::new(RadeltaWriterHandle { writer }));
             RADELTA_OK
@@ -2288,6 +2570,216 @@ mod tests {
             .is_err());
         reader.read_plane(0, 0, 1, &mut out).unwrap();
         assert_eq!(&out[..35], &data[35..70]);
+        drop(reader);
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn pipeline_plan_accounts_for_all_slots_and_falls_back_for_tiny_budgets() {
+        for d in [
+            Dims5 {
+                x: 7,
+                y: 5,
+                z: 9,
+                c: 3,
+                t: 2,
+            },
+            Dims5 {
+                x: 1024,
+                y: 1024,
+                z: 44,
+                c: 1,
+                t: 1,
+            },
+            Dims5 {
+                x: 32768,
+                y: 32768,
+                z: 16,
+                c: 2,
+                t: 1,
+            },
+        ] {
+            for memory in [1usize, 8, 64, 2048] {
+                for threads in [1, 4, 32] {
+                    let (depth, pending) = stream_pipeline_plan(d, memory, 4, threads).unwrap();
+                    assert!((1..=d.z).contains(&depth));
+                    if pending > 0 {
+                        let reserved =
+                            (d.x as u64) * (d.y as u64) * 2 * (depth as u64) * 4 * pending as u64;
+                        assert!(reserved <= (memory as u64) * 1024 * 1024);
+                        assert!(pending <= 8 && pending <= threads);
+                        assert!(depth <= 4 * threads);
+                    } else {
+                        assert_eq!(depth, choose_stream_chunk_depth(d, memory, 4).unwrap());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pipeline_preserves_serial_chunk_bytes_in_single_thread_rayon_pool() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let d = Dims5 {
+                x: 17,
+                y: 11,
+                z: 9,
+                c: 2,
+                t: 2,
+            };
+            let plane = d.x * d.y;
+            let data: Vec<_> = (0..d.voxels().unwrap())
+                .map(|i| ((i * 17 + i / plane * 33) % 6000) as u16)
+                .collect();
+            for mode in [
+                WriterMode::Lossless(Options::default()),
+                WriterMode::Lossy(LossyOptions::default()),
+            ] {
+                let path = temp_path("pipeline-one-worker");
+                let mut writer = RadeltaStreamWriter::new(path.clone(), d, mode, 64).unwrap();
+                assert_eq!(writer.pending_limit, 1);
+                let depth = writer.chunk_z;
+                let count = (d.t * d.c * d.z.div_ceil(depth)) as u64;
+                let mut reference = Vec::new();
+                stream_header(
+                    &mut reference,
+                    match mode {
+                        WriterMode::Lossless(_) => STREAM_MAGIC_LOSSLESS,
+                        WriterMode::Lossy(_) => STREAM_MAGIC_LOSSY,
+                    },
+                    d,
+                    depth,
+                    count,
+                )
+                .unwrap();
+                for t in 0..d.t {
+                    for c in 0..d.c {
+                        for z0 in (0..d.z).step_by(depth) {
+                            let n = depth.min(d.z - z0);
+                            let start = ((t * d.c + c) * d.z + z0) * plane;
+                            let dims = Dims {
+                                x: d.x,
+                                y: d.y,
+                                z: n,
+                            };
+                            let payload = match mode {
+                                WriterMode::Lossless(o) => {
+                                    compress_u16(&data[start..start + n * plane], dims, o)
+                                }
+                                WriterMode::Lossy(o) => {
+                                    compress_lossy_u16(&data[start..start + n * plane], dims, o)
+                                }
+                            }
+                            .unwrap();
+                            for value in [t, c, z0, n] {
+                                write_u32(&mut reference, value as u32).unwrap();
+                            }
+                            write_u64(&mut reference, payload.len() as u64).unwrap();
+                            reference.extend_from_slice(&payload);
+                        }
+                        for z in 0..d.z {
+                            let start = ((t * d.c + c) * d.z + z) * plane;
+                            writer
+                                .write_plane(t, c, z, &data[start..start + plane])
+                                .unwrap();
+                            if z == 1 {
+                                writer.flush_pending().unwrap();
+                            } // does not discard a partial feeder chunk
+                        }
+                    }
+                }
+                writer.finish().unwrap();
+                writer.finish().unwrap();
+                assert_eq!(fs::read(&path).unwrap(), reference);
+                drop(writer);
+                fs::remove_file(path).unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn asynchronous_codec_errors_stay_failed_and_never_publish() {
+        let path = temp_path("pipeline-codec-error");
+        fs::write(&path, b"existing destination").unwrap();
+        let d = Dims5 {
+            x: 7,
+            y: 5,
+            z: 1,
+            c: 1,
+            t: 2,
+        };
+        let options = Options {
+            context_mode: 99,
+            ..Options::default()
+        };
+        let mut writer = RadeltaStreamWriter::create_lossless(&path, d, options, 64).unwrap();
+        assert!(writer.pending_limit > 0);
+        let temporary = writer.pending_output.path().to_owned();
+        let result = writer
+            .write_plane(0, 0, 0, &[3; 35])
+            .and_then(|()| writer.write_plane(1, 0, 0, &[3; 35]))
+            .and_then(|()| writer.finish());
+        assert!(result.is_err());
+        assert!(writer.finish().is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"existing destination");
+        drop(writer);
+        assert!(!temporary.exists());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn dropping_a_writer_waits_for_queued_chunks_and_removes_output() {
+        let path = temp_path("pipeline-drop");
+        let d = Dims5 {
+            x: 128,
+            y: 64,
+            z: 1,
+            c: 1,
+            t: 16,
+        };
+        let mut writer =
+            RadeltaStreamWriter::create_lossless(&path, d, Options::default(), 64).unwrap();
+        assert!(writer.pending_limit > 0);
+        let temporary = writer.pending_output.path().to_owned();
+        for t in 0..3 {
+            writer.write_plane(t, 0, 0, &vec![123; d.x * d.y]).unwrap();
+        }
+        drop(writer);
+        assert!(!path.exists());
+        assert!(!temporary.exists());
+    }
+    #[test]
+    fn sequential_batch_cache_keeps_the_trailing_requested_unit() {
+        let d = Dims5 {
+            x: 17,
+            y: 11,
+            z: 3,
+            c: 2,
+            t: 1,
+        };
+        let pixels = vec![123; d.voxels().unwrap()];
+        let path = temp_path("pipeline-cache-order");
+        fs::write(
+            &path,
+            crate::compress_u16_nd(&pixels, d, Options::default()).unwrap(),
+        )
+        .unwrap();
+        let reader = RadeltaFileHandle::open(&path).unwrap();
+        let mut output = vec![0; d.x * d.y * 3];
+        reader
+            .read_planes(&[(0, 0, 0), (0, 0, 1), (0, 1, 0)], &mut output)
+            .unwrap();
+        let backing = reader.backing.lock().unwrap();
+        let FileBacking::Nd { cache, .. } = &*backing else {
+            panic!()
+        };
+        assert!(!cache.reuse_detected);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entries[0].key, 1);
+        drop(backing);
         drop(reader);
         fs::remove_file(path).unwrap();
     }

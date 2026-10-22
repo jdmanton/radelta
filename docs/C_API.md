@@ -147,6 +147,17 @@ radelta_writer_finish
 radelta_writer_close
 ```
 
+The streaming writer overlaps feeding planes with background compression and
+ordered output, using the shared Rayon pool and a bounded working set selected
+from `memory_mib`. Plane data are copied before a write call returns. A codec
+error can surface on a later write or at finish; always check finish. Errors
+from queued compression or output leave the writer failed and prevent publish.
+Close joins every queued task before removing unfinished output.
+
+Rust callers can use `RadeltaStreamWriter::create_lossless` or `create_lossy`,
+then `write_plane`, `set_metadata` and `finish`. `flush_pending` waits for
+submitted chunks without publishing or discarding a partially filled chunk.
+
 `radelta_writer_finish` fails if not all expected planes have been supplied.
 Writers stage pixels and metadata in a sibling temporary file; the destination
 is created or replaced only when finish succeeds. Closing an unfinished writer

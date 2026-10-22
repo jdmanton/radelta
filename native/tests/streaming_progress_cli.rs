@@ -10,8 +10,8 @@ fn forced_and_automatic_streaming_report_progress_and_preserve_planes() {
     let mut expected = Vec::new();
     {
         let mut tiff = TiffEncoder::new(File::create(&input).unwrap()).unwrap();
-        // 44 planes: two chunks per TC volume at a 64 MiB budget, including
-        // a shorter final chunk. Perfect squares survive the chosen lossy step.
+        // 44 planes: multiple block-aligned chunks per TC volume at a
+        // 64 MiB budget, including a shorter final chunk. Perfect squares survive the chosen lossy step.
         for page in 0..44 {
             let pixels: Vec<u16> = (0..1024 * 1024)
                 .map(|i| {
@@ -65,17 +65,22 @@ fn forced_and_automatic_streaming_report_progress_and_preserve_planes() {
                 String::from_utf8_lossy(&result.stderr)
             );
             let stdout = String::from_utf8(result.stdout).unwrap();
+            let bytes = fs::read(&encoded).unwrap();
+            let depth = u32::from_le_bytes(bytes[28..32].try_into().unwrap()) as usize;
+            let chunks = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+            assert!((1..=11).contains(&depth));
+            assert_eq!(chunks, (4 * 11usize.div_ceil(depth)) as u64);
             let stages = [
-                "Streaming layout: 8 chunk(s), up to 8 Z plane(s) per chunk; input has 44 physical / 44 logical TIFF plane(s).",
-                "Reading first chunk...",
-                "chunk 8/8 (100.0%)",
-                "Saving TIFF metadata...",
-                "Wrote ",
+                format!("Streaming layout: {chunks} chunk(s), up to {depth} Z plane(s) per chunk; input has 44 physical / 44 logical TIFF plane(s)."),
+                "Reading first chunk...".into(),
+                format!("chunk {chunks}/{chunks} (100.0%)"),
+                "Saving TIFF metadata...".into(),
+                "Wrote ".into(),
             ];
             let mut previous_position = 0;
             for stage in stages {
                 let position = stdout
-                    .find(stage)
+                    .find(&stage)
                     .unwrap_or_else(|| panic!("missing {stage}: {stdout}"));
                 assert!(
                     position >= previous_position,
@@ -101,7 +106,6 @@ fn forced_and_automatic_streaming_report_progress_and_preserve_planes() {
                     }
                 }
             }
-            let bytes = fs::read(&encoded).unwrap();
             if let Some(previous) = previous.as_ref() {
                 assert_eq!(&bytes, previous, "forced/automatic streams differed");
             }

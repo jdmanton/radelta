@@ -1,12 +1,11 @@
 mod ome;
+mod prefetch;
 mod tiff_io;
 mod tiff_metadata;
 use ome::infer_ome_layout;
 use radelta_native::{
-    choose_stream_chunk_depth, compress_lossy_u16_nd_with_stats, compress_lossy_u16_with_stats,
-    compress_u16_nd_with_stats, compress_u16_with_stats, decompress_u16_nd_into, ContextMode, Dims,
-    Dims5, LossyOptions, Options, DEFAULT_BLOCK_DEPTH, DEFAULT_STREAM_MEMORY_MIB,
-    STREAM_MAGIC_LOSSLESS, STREAM_MAGIC_LOSSY, STREAM_VERSION,
+    compress_lossy_u16_nd_with_stats, compress_u16_nd_with_stats, decompress_u16_nd_into,
+    ContextMode, Dims5, LossyOptions, Options, DEFAULT_STREAM_MEMORY_MIB,
 };
 use std::env;
 use std::fs::{self, File};
@@ -67,7 +66,7 @@ fn usage() -> ! {
         "Usage:\n  \\
          radelta encode INPUT.tif OUTPUT.rdlt [codec options] [dataset options]\n  \\
          radelta encode-lossy INPUT.tif OUTPUT.rdlt --offset-adu O (--gain-e-per-adu G | --gain-adu-per-e G) [--noise-step D] [codec options] [dataset options]\n  \\
-         radelta decode INPUT.rdlt OUTPUT.tif [--page-order TCZ]\n\n\
+         radelta decode INPUT.rdlt OUTPUT.tif [--page-order TCZ] [--memory-mib N]\n\n\
          Benchmarks (in memory, median of 3 runs after warm-up):\n  \
            radelta benchmark INPUT.tif [--repeats N] [codec options] [dataset options]\n  \
            radelta benchmark-lossy INPUT.tif --offset-adu O --gain-e-per-adu G [--noise-step D] [--repeats N] [codec options] [dataset options]\n\n\
@@ -81,7 +80,7 @@ fn usage() -> ! {
            --z N                 override inferred number of Z planes\n  \\
            --page-order TCZ      override page axes, slowest to fastest\n  \\
            --ignore-metadata     do not use OME/ImageJ dimensional metadata\n  \
-           --memory-mib N        approximate RAM budget for encoding (default 2048)\n  \
+           --memory-mib N        approximate streaming RAM budget (default 2048)\n  \
            --stream              force chunked out-of-core encoding\n\n\
          Metadata option (all commands): --metadata-limit-mib N (default 1024).\n\n\
          TIFF metadata is preserved; decode restores source page order by default.\n\n\
@@ -859,6 +858,7 @@ fn reorder_pages_to_tczyx(raw: Vec<u16>, layout: &ResolvedLayout) -> Vec<u16> {
     out
 }
 
+#[derive(Clone)]
 struct StreamingDataset {
     layout: ResolvedLayout,
     canonical_to_source: Vec<usize>,
@@ -1149,36 +1149,6 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
     })
 }
 
-fn write_u16_le<W: Write>(w: &mut W, v: u16) -> Result<(), String> {
-    w.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())
-}
-fn write_u32_le<W: Write>(w: &mut W, v: u32) -> Result<(), String> {
-    w.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())
-}
-fn write_u64_le<W: Write>(w: &mut W, v: u64) -> Result<(), String> {
-    w.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())
-}
-fn stream_header<W: Write>(
-    w: &mut W,
-    magic: &[u8; 4],
-    d: Dims5,
-    chunk_z: usize,
-    chunks: u64,
-) -> Result<(), String> {
-    w.write_all(magic).map_err(|e| e.to_string())?;
-    write_u16_le(w, STREAM_VERSION)?;
-    write_u16_le(w, 0)?;
-    for v in [d.x, d.y, d.z, d.c, d.t] {
-        write_u32_le(w, u32::try_from(v).map_err(|_| "dimension exceeds u32")?)?;
-    }
-    write_u32_le(
-        w,
-        u32::try_from(chunk_z).map_err(|_| "chunk depth exceeds u32")?,
-    )?;
-    write_u64_le(w, chunks)?;
-    Ok(())
-}
-
 fn encode_streaming_lossless(
     input: &Path,
     output: &Path,
@@ -1186,125 +1156,13 @@ fn encode_streaming_lossless(
     ds: &DatasetArgs,
     info: &StreamingDataset,
 ) -> Result<(), String> {
-    let d = info.layout.dims;
-    let block_depth = if opts.block_depth == 0 {
-        DEFAULT_BLOCK_DEPTH
-    } else {
-        opts.block_depth as usize
-    };
-    let chunk_z =
-        choose_stream_chunk_depth(d, ds.memory_mib, block_depth).map_err(|e| e.to_string())?;
-    let chunks_per_volume = d.z.div_ceil(chunk_z);
-    let chunk_count = (d.t as u64)
-        .checked_mul(d.c as u64)
-        .and_then(|v| v.checked_mul(chunks_per_volume as u64))
-        .ok_or("chunk count overflow")?;
-
-    let mut planes = PlaneReader::open(input, info)?;
-    let (mut pending, file) =
-        radelta_native::output::PendingOutput::create(output).map_err(|e| e.to_string())?;
-    let mut out = BufWriter::new(file);
-    stream_header(&mut out, STREAM_MAGIC_LOSSLESS, d, chunk_z, chunk_count)?;
-    out.flush().map_err(|e| e.to_string())?;
-
-    println!(
-        "Streaming layout: {} chunk(s), up to {} Z plane(s) per chunk; input has {} physical / {} logical TIFF plane(s).",
-        chunk_count, chunk_z, info.physical_pages, info.logical_pages
-    );
-    println!("Reading first chunk...");
-    std::io::stdout().flush().map_err(|e| e.to_string())?;
-
-    let start = Instant::now();
-    let mut last_progress = Instant::now();
-    let mut raw_bytes = 0usize;
-    let mut payload_bytes = 0usize;
-    let mut chunks_written = 0u64;
-    let plane_samples = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
-    let mut chunk = Vec::<u16>::with_capacity(
-        plane_samples
-            .checked_mul(chunk_z)
-            .ok_or("chunk size overflow")?,
-    );
-
-    for t in 0..d.t {
-        for c in 0..d.c {
-            let mut z0 = 0usize;
-            while z0 < d.z {
-                let depth = (d.z - z0).min(chunk_z);
-                chunk.clear();
-                for z in z0..z0 + depth {
-                    let canon = (t * d.c + c) * d.z + z;
-                    let src = info.canonical_to_source[canon];
-                    let start = chunk.len();
-                    chunk.resize(start + plane_samples, 0);
-                    planes.read_plane_into(src, &mut chunk[start..])?;
-                }
-                let cd = Dims {
-                    x: d.x,
-                    y: d.y,
-                    z: depth,
-                };
-                let (payload, _st) =
-                    compress_u16_with_stats(&chunk, cd, opts).map_err(|e| e.to_string())?;
-                write_u32_le(&mut out, t as u32)?;
-                write_u32_le(&mut out, c as u32)?;
-                write_u32_le(&mut out, z0 as u32)?;
-                write_u32_le(&mut out, depth as u32)?;
-                write_u64_le(&mut out, payload.len() as u64)?;
-                out.write_all(&payload).map_err(|e| e.to_string())?;
-                raw_bytes += chunk.len() * 2;
-                payload_bytes += payload.len();
-                chunks_written += 1;
-                if last_progress.elapsed().as_secs_f64() >= 1.0 || chunks_written == chunk_count {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let pct = 100.0 * chunks_written as f64 / chunk_count.max(1) as f64;
-                    println!(
-                        "  chunk {}/{} ({:.1}%)  raw {:.3} GiB  elapsed {:.1} s  {:.3} GB/s including TIFF I/O",
-                        chunks_written,
-                        chunk_count,
-                        pct,
-                        raw_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                        elapsed,
-                        gb_per_s(raw_bytes, elapsed)
-                    );
-                    std::io::stdout().flush().map_err(|e| e.to_string())?;
-                    last_progress = Instant::now();
-                }
-                z0 += depth;
-            }
-        }
-    }
-    println!("Saving TIFF metadata...");
-    std::io::stdout().flush().map_err(|e| e.to_string())?;
-    let metadata = tiff_metadata::capture(input, &info.layout)?;
-    radelta_native::metadata::finish_new_file_metadata(&mut out, &metadata)
-        .map_err(|e| e.to_string())?;
-    drop(out);
-    let total = fs::metadata(pending.path())
-        .map_err(|e| e.to_string())?
-        .len() as usize;
-    pending.publish().map_err(|e| e.to_string())?;
-    let secs = start.elapsed().as_secs_f64();
-    println!("Wrote {} ({:.3} MiB)", output.display(), mib(total));
-    println!(
-        "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
-        d.t, d.c, d.z, d.y, d.x
-    );
-    println!(
-        "Out-of-core chunks: {} (up to {} Z planes each)",
-        chunks_written, chunk_z
-    );
-    println!("RAM budget:       {} MiB", ds.memory_mib);
-    println!("Payload bytes:    {:.3} MiB", mib(payload_bytes));
-    println!(
-        "Compression ratio:{:.2}:1",
-        raw_bytes as f64 / total.max(1) as f64
-    );
-    println!(
-        "Encode rate:      {:.3} GB/s (TIFF I/O included)",
-        gb_per_s(raw_bytes, secs)
-    );
-    Ok(())
+    let writer = radelta_native::RadeltaStreamWriter::create_lossless(
+        output,
+        info.layout.dims,
+        opts,
+        ds.memory_mib,
+    )?;
+    encode_streaming(input, output, ds, info, writer)
 }
 
 fn encode_streaming_lossy(
@@ -1314,102 +1172,110 @@ fn encode_streaming_lossy(
     ds: &DatasetArgs,
     info: &StreamingDataset,
 ) -> Result<(), String> {
-    let d = info.layout.dims;
-    let block_depth = if opts.block_depth == 0 {
-        DEFAULT_BLOCK_DEPTH
-    } else {
-        opts.block_depth as usize
-    };
-    let chunk_z =
-        choose_stream_chunk_depth(d, ds.memory_mib, block_depth).map_err(|e| e.to_string())?;
-    let chunks_per_volume = d.z.div_ceil(chunk_z);
-    let chunk_count = (d.t as u64)
-        .checked_mul(d.c as u64)
-        .and_then(|v| v.checked_mul(chunks_per_volume as u64))
-        .ok_or("chunk count overflow")?;
-
-    let mut planes = PlaneReader::open(input, info)?;
-    let (mut pending, file) =
-        radelta_native::output::PendingOutput::create(output).map_err(|e| e.to_string())?;
-    let mut out = BufWriter::new(file);
-    stream_header(&mut out, STREAM_MAGIC_LOSSY, d, chunk_z, chunk_count)?;
-    out.flush().map_err(|e| e.to_string())?;
-
+    let writer = radelta_native::RadeltaStreamWriter::create_lossy(
+        output,
+        info.layout.dims,
+        opts,
+        ds.memory_mib,
+    )?;
+    encode_streaming(input, output, ds, info, writer)?;
     println!(
-        "Streaming layout: {} chunk(s), up to {} Z plane(s) per chunk; input has {} physical / {} logical TIFF plane(s).",
-        chunk_count, chunk_z, info.physical_pages, info.logical_pages
+        "offset={:.6} ADU, gain={:.6} e-/ADU, noise-step={:.6}",
+        opts.offset_adu, opts.gain_e_per_adu, opts.noise_step
     );
+    Ok(())
+}
+
+fn pixel_buffer(samples: usize) -> Result<Vec<u16>, String> {
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(samples)
+        .map_err(|_| "cannot allocate pipeline pixel buffer")?;
+    pixels.resize(samples, 0);
+    Ok(pixels)
+}
+
+fn encode_streaming(
+    input: &Path,
+    output: &Path,
+    ds: &DatasetArgs,
+    info: &StreamingDataset,
+    mut writer: radelta_native::RadeltaStreamWriter,
+) -> Result<(), String> {
+    let d = info.layout.dims;
+    let chunk_z = writer.chunk_depth();
+    let chunk_count = (d.t as u64) * (d.c as u64) * d.z.div_ceil(chunk_z) as u64;
+    println!("Streaming layout: {} chunk(s), up to {} Z plane(s) per chunk; input has {} physical / {} logical TIFF plane(s).",chunk_count,chunk_z,info.physical_pages,info.logical_pages);
     println!("Reading first chunk...");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
-
     let start = Instant::now();
     let mut last_progress = Instant::now();
-    let mut raw_bytes = 0usize;
-    let mut chunks_written = 0u64;
-    let plane_samples = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
-    let mut chunk = Vec::<u16>::with_capacity(
-        plane_samples
-            .checked_mul(chunk_z)
-            .ok_or("chunk size overflow")?,
-    );
-
-    for t in 0..d.t {
-        for c in 0..d.c {
-            let mut z0 = 0usize;
-            while z0 < d.z {
-                let depth = (d.z - z0).min(chunk_z);
-                chunk.clear();
-                for z in z0..z0 + depth {
-                    let canon = (t * d.c + c) * d.z + z;
-                    let src = info.canonical_to_source[canon];
-                    let start = chunk.len();
-                    chunk.resize(start + plane_samples, 0);
-                    planes.read_plane_into(src, &mut chunk[start..])?;
-                }
-                let cd = Dims {
-                    x: d.x,
-                    y: d.y,
-                    z: depth,
-                };
-                let (payload, _st) =
-                    compress_lossy_u16_with_stats(&chunk, cd, opts).map_err(|e| e.to_string())?;
-                write_u32_le(&mut out, t as u32)?;
-                write_u32_le(&mut out, c as u32)?;
-                write_u32_le(&mut out, z0 as u32)?;
-                write_u32_le(&mut out, depth as u32)?;
-                write_u64_le(&mut out, payload.len() as u64)?;
-                out.write_all(&payload).map_err(|e| e.to_string())?;
-                raw_bytes += chunk.len() * 2;
-                chunks_written += 1;
-                if last_progress.elapsed().as_secs_f64() >= 1.0 || chunks_written == chunk_count {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let pct = 100.0 * chunks_written as f64 / chunk_count.max(1) as f64;
-                    println!(
-                        "  chunk {}/{} ({:.1}%)  raw {:.3} GiB  elapsed {:.1} s  {:.3} GB/s including TIFF I/O",
-                        chunks_written,
-                        chunk_count,
-                        pct,
-                        raw_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                        elapsed,
-                        gb_per_s(raw_bytes, elapsed)
-                    );
-                    std::io::stdout().flush().map_err(|e| e.to_string())?;
-                    last_progress = Instant::now();
-                }
-                z0 += depth;
-            }
+    let mut report = |writer: &radelta_native::RadeltaStreamWriter,
+                      force: bool|
+     -> Result<(), String> {
+        if force || last_progress.elapsed().as_secs_f64() >= 1.0 {
+            let elapsed = start.elapsed().as_secs_f64();
+            println!("  chunk {}/{} ({:.1}%)  raw {:.3} GiB  elapsed {:.1} s  {:.3} GB/s including TIFF I/O",
+                writer.chunks_written(),chunk_count,100.*writer.chunks_written() as f64/chunk_count as f64,
+                writer.raw_bytes_written() as f64/(1024.*1024.*1024.),elapsed,gb_per_s(writer.raw_bytes_written(),elapsed));
+            std::io::stdout().flush().map_err(|e| e.to_string())?;
+            last_progress = Instant::now();
         }
-    }
+        Ok(())
+    };
+    let plane = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
+    let total_planes = d.t * d.c * d.z;
+    {
+        let source = input.to_path_buf();
+        let source_info = info.clone();
+        let mut reader = None;
+        let mut next = 0;
+        let mut buffers = vec![(0, pixel_buffer(plane)?)];
+        if writer.pending_limit() > 0 {
+            buffers.push((0, pixel_buffer(plane)?));
+        }
+        let mut ahead = prefetch::Prefetch::new(buffers, move |(index, pixels)| {
+            if next == total_planes {
+                return Ok(false);
+            }
+            if reader.is_none() {
+                reader = Some(PlaneReader::open(&source, &source_info)?);
+            }
+            reader
+                .as_mut()
+                .unwrap()
+                .read_plane_into(source_info.canonical_to_source[next], pixels)?;
+            *index = next;
+            next += 1;
+            Ok(true)
+        })?;
+        let mut fed = 0;
+        while let Some(buffer) = ahead.next()? {
+            let (canonical, pixels) = &buffer;
+            if *canonical != fed {
+                return Err("TIFF read pipeline returned planes out of order".into());
+            }
+            writer.write_plane(
+                canonical / (d.c * d.z),
+                (canonical / d.z) % d.c,
+                canonical % d.z,
+                pixels,
+            )?;
+            ahead.recycle(buffer);
+            fed += 1;
+            report(&writer, false)?;
+        }
+        if fed != total_planes {
+            return Err("TIFF read pipeline ended early".into());
+        }
+    } // The TIFF reader is joined before metadata capture or publication.
+    writer.flush_pending()?;
+    report(&writer, true)?;
     println!("Saving TIFF metadata...");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
-    let metadata = tiff_metadata::capture(input, &info.layout)?;
-    radelta_native::metadata::finish_new_file_metadata(&mut out, &metadata)
-        .map_err(|e| e.to_string())?;
-    drop(out);
-    let total = fs::metadata(pending.path())
-        .map_err(|e| e.to_string())?
-        .len() as usize;
-    pending.publish().map_err(|e| e.to_string())?;
+    writer.set_metadata(tiff_metadata::capture(input, &info.layout)?)?;
+    writer.finish()?;
+    let total = fs::metadata(output).map_err(|e| e.to_string())?.len() as usize;
     let secs = start.elapsed().as_secs_f64();
     println!("Wrote {} ({:.3} MiB)", output.display(), mib(total));
     println!(
@@ -1418,20 +1284,18 @@ fn encode_streaming_lossy(
     );
     println!(
         "Out-of-core chunks: {} (up to {} Z planes each)",
-        chunks_written, chunk_z
+        writer.chunks_written(),
+        chunk_z
     );
     println!("RAM budget:       {} MiB", ds.memory_mib);
+    println!("Payload bytes:    {:.3} MiB", mib(writer.payload_bytes()));
     println!(
         "Compression ratio:{:.2}:1",
-        raw_bytes as f64 / total.max(1) as f64
+        writer.raw_bytes_written() as f64 / total.max(1) as f64
     );
     println!(
         "Encode rate:      {:.3} GB/s (TIFF I/O included)",
-        gb_per_s(raw_bytes, secs)
-    );
-    println!(
-        "offset={:.6} ADU, gain={:.6} e-/ADU, noise-step={:.6}",
-        opts.offset_adu, opts.gain_e_per_adu, opts.noise_step
+        gb_per_s(writer.raw_bytes_written(), secs)
     );
     Ok(())
 }
@@ -1715,17 +1579,159 @@ fn benchmark_lossy(
     Ok(())
 }
 
-fn parse_decode_page_order(args: &[String]) -> String {
-    if args.is_empty() {
-        return "TCZ".to_string();
+fn parse_decode_options(args: &[String]) -> Result<(Option<String>, usize), String> {
+    let mut order = None;
+    let mut memory = DEFAULT_STREAM_MEMORY_MIB;
+    if !args.len().is_multiple_of(2) {
+        return Err("decode options need values".into());
     }
-    if args.len() == 2 && args[0] == "--page-order" {
-        let o = args[1].to_ascii_uppercase();
-        validate_page_order(&o).unwrap_or_else(|_| usage());
-        o
-    } else {
-        usage()
+    for pair in args.as_chunks::<2>().0 {
+        match pair[0].as_str() {
+            "--page-order" => {
+                let value = pair[1].to_ascii_uppercase();
+                validate_page_order(&value)?;
+                order = Some(value);
+            }
+            "--memory-mib" => {
+                memory = pair[1]
+                    .parse::<usize>()
+                    .map_err(|_| "--memory-mib requires a positive integer")?;
+                if memory == 0 {
+                    return Err("--memory-mib requires a positive integer".into());
+                }
+            }
+            _ => return Err(format!("unknown decode option: {}", pair[0])),
+        }
     }
+    Ok((order, memory))
+}
+
+struct DecodedBatch {
+    first: usize,
+    planes: usize,
+    pixels: Vec<u16>,
+}
+
+struct DirectPlaneSource {
+    file: std::sync::Arc<radelta_native::RadeltaFileHandle>,
+    d: Dims5,
+    pixels: Vec<u16>,
+}
+impl tiff_metadata::PlaneSource for DirectPlaneSource {
+    fn plane(&mut self, i: usize) -> Result<&[u16], String> {
+        let d = self.d;
+        self.file
+            .read_plane(i / (d.c * d.z), (i / d.z) % d.c, i % d.z, &mut self.pixels)?;
+        Ok(&self.pixels)
+    }
+}
+
+struct PrefetchedPlaneSource {
+    ahead: prefetch::Prefetch<DecodedBatch>,
+    mapping: std::sync::Arc<Vec<usize>>,
+    current: Option<DecodedBatch>,
+    page: usize,
+    plane: usize,
+}
+impl tiff_metadata::PlaneSource for PrefetchedPlaneSource {
+    fn plane(&mut self, canonical: usize) -> Result<&[u16], String> {
+        if self.mapping.get(self.page) != Some(&canonical) {
+            return Err("TIFF writer requested unexpected plane order".into());
+        }
+        if self
+            .current
+            .as_ref()
+            .is_none_or(|b| self.page == b.first + b.planes)
+        {
+            if let Some(old) = self.current.take() {
+                self.ahead.recycle(old);
+            }
+            let batch = self.ahead.next()?.ok_or("decode pipeline ended early")?;
+            if batch.first != self.page {
+                return Err("decode pipeline returned unexpected plane order".into());
+            }
+            self.current = Some(batch);
+        }
+        let batch = self.current.as_ref().unwrap();
+        let start = (self.page - batch.first) * self.plane;
+        self.page += 1;
+        Ok(&batch.pixels[start..start + self.plane])
+    }
+}
+
+fn decode_to_tiff(
+    file: std::sync::Arc<radelta_native::RadeltaFileHandle>,
+    d: Dims5,
+    order: Option<&str>,
+    memory_mib: usize,
+    path: &Path,
+) -> Result<(), String> {
+    let budget = memory_mib
+        .checked_mul(1024 * 1024)
+        .ok_or("memory budget overflow")?;
+    let plane = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
+    let plane_bytes = plane.checked_mul(2).ok_or("plane size overflow")?;
+    let mapping = std::sync::Arc::new(tiff_metadata::write_order(d, order, file.metadata())?);
+    let count = ((budget / 8).min(32 * 1024 * 1024) / plane_bytes)
+        .clamp(1, 128)
+        .min(mapping.len());
+    // Sequential batches smaller than one stored unit add buffering without
+    // exposing independent units to the codec pool. Keep the direct path.
+    let sequential_unit = count <= file.decode_unit_depth()?
+        && mapping.iter().enumerate().all(|(page, &i)| page == i);
+    // Two output buffers share at most 1/4 of the allowance (64 MiB max),
+    // except when a single plane is larger. Keep the existing cache ceiling.
+    if plane_bytes > budget / 8 || mapping.len() == 1 || sequential_unit {
+        file.set_cache_limit((budget / 4).min(radelta_native::DEFAULT_FILE_CACHE_BYTES))?;
+        let mut source = DirectPlaneSource {
+            file: file.clone(),
+            d,
+            pixels: pixel_buffer(plane)?,
+        };
+        return tiff_metadata::write(path, d, order, file.metadata(), &mut source);
+    }
+    file.set_cache_limit((budget / 4).min(radelta_native::DEFAULT_FILE_CACHE_BYTES))?;
+    let make_buffer = || {
+        Ok::<_, String>(DecodedBatch {
+            first: 0,
+            planes: 0,
+            pixels: pixel_buffer(plane.checked_mul(count).ok_or("batch size overflow")?)?,
+        })
+    };
+    let source = file.clone();
+    let sequence = mapping.clone();
+    let mut next = 0;
+    let ahead = prefetch::Prefetch::new(vec![make_buffer()?, make_buffer()?], move |batch| {
+        if next == sequence.len() {
+            return Ok(false);
+        }
+        let n = count.min(sequence.len() - next);
+        let coords: Vec<_> = sequence[next..next + n]
+            .iter()
+            .map(|&i| (i / (d.c * d.z), (i / d.z) % d.c, i % d.z))
+            .collect();
+        batch.pixels.resize(n * plane, 0);
+        source.read_planes_with_budget(
+            &coords,
+            &mut batch.pixels,
+            (budget / 2).min(256 * 1024 * 1024) as u64,
+        )?;
+        batch.first = next;
+        batch.planes = n;
+        next += n;
+        Ok(true)
+    })?;
+    let mut source = PrefetchedPlaneSource {
+        ahead,
+        mapping,
+        current: None,
+        page: 0,
+        plane,
+    };
+    let result = tiff_metadata::write(path, d, order, file.metadata(), &mut source);
+    // Source drop closes both channels and joins the read worker before publish.
+    drop(source);
+    result
 }
 
 fn configure_metadata_limit(args: &mut Vec<String>) -> Result<(), String> {
@@ -1935,11 +1941,10 @@ fn main() {
             if args.len() < 4 {
                 usage();
             }
-            let order = if args.len() == 4 {
-                None
-            } else {
-                Some(parse_decode_page_order(&args[4..]))
-            };
+            let (order, memory_mib) = parse_decode_options(&args[4..]).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1)
+            });
             let input = Path::new(&args[2]);
             let output = Path::new(&args[3]);
             radelta_native::RadeltaFileHandle::open(input).and_then(|file| {
@@ -1954,20 +1959,14 @@ fn main() {
                 let (mut pending, reserved) = radelta_native::output::PendingOutput::create(output)
                     .map_err(|e| e.to_string())?;
                 drop(reserved);
-                tiff_metadata::write(
-                    pending.path(),
+                let metadata_len = file.metadata().len();
+                decode_to_tiff(
+                    std::sync::Arc::new(file),
                     d,
                     order.as_deref(),
-                    file.metadata(),
-                    |canonical, pixels| {
-                        let z = canonical % d.z;
-                        let c = (canonical / d.z) % d.c;
-                        let t = canonical / (d.z * d.c);
-                        file.read_plane(t, c, z, pixels)
-                    },
+                    memory_mib,
+                    pending.path(),
                 )?;
-                let metadata_len = file.metadata().len();
-                drop(file);
                 pending.publish().map_err(|e| e.to_string())?;
                 println!("Wrote {}", output.display());
                 println!(

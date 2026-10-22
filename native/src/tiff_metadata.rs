@@ -415,18 +415,13 @@ fn prepare<W: Write + Seek, K: TiffKind>(
     }
     Ok(out)
 }
-/// Write both memory and streaming datasets through the same metadata-aware TIFF path.
-pub fn write(
-    path: &Path,
+fn page_mapping(
     d: Dims5,
     order: Option<&str>,
-    metadata: &[u8],
-    mut plane_reader: impl FnMut(usize, &mut [u16]) -> Result<(), String>,
-) -> Result<(), String> {
-    d.voxels().map_err(|e| e.to_string())?;
-    let saved = TiffMetadata::parse(metadata, d)?;
+    saved: Option<&TiffMetadata>,
+) -> Result<Vec<usize>, String> {
     let pages = d.t * d.c * d.z;
-    let mapping = if let (None, Some(saved)) = (order, saved.as_ref()) {
+    Ok(if let (None, Some(saved)) = (order, saved) {
         saved.mapping.clone()
     } else {
         let order = order.unwrap_or("TCZ");
@@ -437,7 +432,32 @@ pub fn write(
                 (t * d.c + c) * d.z + z
             })
             .collect()
-    };
+    })
+}
+
+pub fn write_order(d: Dims5, order: Option<&str>, metadata: &[u8]) -> Result<Vec<usize>, String> {
+    d.voxels().map_err(|e| e.to_string())?;
+    let saved = TiffMetadata::parse(metadata, d)?;
+    page_mapping(d, order, saved.as_ref())
+}
+
+/// A plane borrowed from either a direct reader or a reusable read-ahead batch.
+/// The pixels remain valid until the next mutable access to this source.
+pub trait PlaneSource {
+    fn plane(&mut self, canonical: usize) -> Result<&[u16], String>;
+}
+
+/// Write both memory and streaming datasets through the same metadata-aware TIFF path.
+pub fn write(
+    path: &Path,
+    d: Dims5,
+    order: Option<&str>,
+    metadata: &[u8],
+    plane_reader: &mut impl PlaneSource,
+) -> Result<(), String> {
+    d.voxels().map_err(|e| e.to_string())?;
+    let saved = TiffMetadata::parse(metadata, d)?;
+    let mapping = page_mapping(d, order, saved.as_ref())?;
     let preserve = saved
         .as_ref()
         .is_some_and(|m| m.layout_valid && m.mapping == mapping);
@@ -445,7 +465,7 @@ pub fn write(
         .as_ref()
         .filter(|m| preserve && m.imagej_description())
     {
-        return write_imagej_layout(path, d, &mapping, m, &mut plane_reader);
+        return write_imagej_layout(path, d, &mapping, m, plane_reader);
     }
     let size = (d.voxels().map_err(|e| e.to_string())? as u64)
         .checked_mul(2)
@@ -464,7 +484,7 @@ pub fn write(
             preserve,
             order,
             metadata,
-            &mut plane_reader,
+            plane_reader,
         )?;
     } else {
         let mut enc = TiffEncoder::new(&mut writer).map_err(|e| e.to_string())?;
@@ -476,7 +496,7 @@ pub fn write(
             preserve,
             order,
             metadata,
-            &mut plane_reader,
+            plane_reader,
         )?;
     }
     writer.flush().map_err(|e| e.to_string())
@@ -598,25 +618,23 @@ fn write_imagej_layout(
     d: Dims5,
     mapping: &[usize],
     m: &TiffMetadata,
-    read: &mut impl FnMut(usize, &mut [u16]) -> Result<(), String>,
+    read: &mut impl PlaneSource,
 ) -> Result<(), String> {
     let (ifds, data_start) = imagej_header_plan(d, m, mapping.len())?;
     let plane_len = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
-    let mut plane = Vec::new();
-    plane
-        .try_reserve_exact(plane_len)
-        .map_err(|_| format!("cannot allocate a {}x{} plane buffer", d.x, d.y))?;
-    plane.resize(plane_len, 0u16);
     let mut out =
         BufWriter::with_capacity(1024 * 1024, File::create(path).map_err(|e| e.to_string())?);
     if write_imagej_prefix(&mut out, d, m, ifds, data_start)? != data_start {
         return Err("ImageJ TIFF prefix size changed while resolving strip offsets".into());
     }
     for &canonical in mapping {
-        read(canonical, &mut plane)?;
+        let plane = read.plane(canonical)?;
+        if plane.len() != plane_len {
+            return Err("TIFF plane source returned the wrong sample count".into());
+        }
         // TiffEncoder writes a native-endian header; the initialized u16
         // storage has the same byte order and needs no per-pixel conversion.
-        out.write_all(tiff_io::u16_bytes_mut(&mut plane))
+        out.write_all(tiff_io::u16_bytes(plane))
             .map_err(|e| e.to_string())?;
     }
     out.flush().map_err(|e| e.to_string())
@@ -631,7 +649,7 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
     preserve: bool,
     order: Option<&str>,
     metadata: &[u8],
-    read: &mut impl FnMut(usize, &mut [u16]) -> Result<(), String>,
+    read: &mut impl PlaneSource,
 ) -> Result<(), String> {
     let inverse = saved.map(|m| {
         let mut inverse = vec![0; mapping.len()];
@@ -643,11 +661,6 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
     // Fail with an error rather than aborting if a damaged header slipped
     // past validation and still describes an impossible plane.
     let plane_len = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
-    let mut plane: Vec<u16> = Vec::new();
-    plane
-        .try_reserve_exact(plane_len)
-        .map_err(|_| format!("cannot allocate a {}x{} plane buffer", d.x, d.y))?;
-    plane.resize(plane_len, 0);
     let mut generated = ome_description(d, order.unwrap_or("TCZ"));
     let described_order = order.unwrap_or("TCZ");
     let regular = mapping.iter().enumerate().all(|(p, &canonical)| {
@@ -670,7 +683,10 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
         );
     }
     for (page, &canonical) in mapping.iter().enumerate() {
-        read(canonical, &mut plane)?;
+        let plane = read.plane(canonical)?;
+        if plane.len() != plane_len {
+            return Err("TIFF plane source returned the wrong sample count".into());
+        }
         let source_page = inverse.as_ref().map(|v| v[canonical]);
         let tags = if let (Some(m), Some(p)) = (saved, source_page) {
             prepare(enc, m.page_tags(p))?
@@ -706,7 +722,7 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
                     .map_err(|e| e.to_string())?;
             }
         }
-        image.write_data(&plane).map_err(|e| e.to_string())?;
+        image.write_data(plane).map_err(|e| e.to_string())?;
     }
     Ok(())
 }

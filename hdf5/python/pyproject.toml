@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "radelta-hdf5"
-version = "0.8.3"
+version = "0.8.4"
 description = "HDF5 dataset tools for the Radelta compression filter"
 requires-python = ">=3.9"
 license = {text = "BSD-3-Clause"}

@@ -76,6 +76,14 @@ pub fn read_plane<R: Read + Seek>(dec: &mut Decoder<R>, out: &mut [u16]) -> Resu
     }
 }
 
+pub fn u16_bytes(pixels: &[u16]) -> &[u8] {
+    // SAFETY: initialized u16 values have no padding. The byte view borrows
+    // exactly their storage read-only for the same lifetime.
+    unsafe {
+        std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), std::mem::size_of_val(pixels))
+    }
+}
+
 pub fn u16_bytes_mut(out: &mut [u16]) -> &mut [u8] {
     // SAFETY: u16 has no padding or invalid bit patterns. This byte slice
     // uniquely borrows exactly the initialized storage of out.

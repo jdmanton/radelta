@@ -7,7 +7,7 @@ The executable is named `radelta` (`radelta.exe` on Windows). It reads 16-bit gr
 ```text
 radelta encode INPUT.tif OUTPUT.rdlt [options]
 radelta encode-lossy INPUT.tif OUTPUT.rdlt --offset-adu O (--gain-e-per-adu G | --gain-adu-per-e G) [options]
-radelta decode INPUT.rdlt OUTPUT.tif [--page-order TCZ]
+radelta decode INPUT.rdlt OUTPUT.tif [--page-order TCZ] [--memory-mib N]
 radelta benchmark INPUT.tif [--repeats N] [options]
 radelta benchmark-lossy INPUT.tif --offset-adu O (--gain-e-per-adu G | --gain-adu-per-e G) [--repeats N] [options]
 ```
@@ -175,7 +175,7 @@ Large datasets can be written as streaming `RDS3`/`RQS3` files. Streaming is sel
 
 | Option | Meaning | Default |
 | --- | --- | --- |
-| `--memory-mib N` | approximate encoding RAM budget | `2048` MiB |
+| `--memory-mib N` | approximate streaming RAM budget (encode/decode) | `2048` MiB |
 | `--stream` | force bounded-memory streaming | off |
 
 ## Lossy calibration
@@ -255,6 +255,43 @@ chunks have been written.
 The TIFF layout found during the initial inspection is reused for encoding,
 avoiding a second directory scan. Progress is enabled automatically for forced
 (`--stream`) and automatically selected out-of-core encoding.
+
+## Streaming pipeline
+
+Streaming encode overlaps TIFF reading, compression and ordered Radelta output.
+It reuses one or two TIFF plane buffers and a bounded set of chunk buffers.
+Compression jobs share the existing Rayon pool; at most eight chunks are
+submitted ahead. The chunk planner divides the approximate working allowance
+between encode slots, using four raw-chunk sizes per slot as its working-set
+estimate and recycling completed input buffers into the feeder.
+It retains block alignment where affordable and falls back to serial chunk
+processing when the minimum pipeline would exceed that allowance.
+Streaming chunk boundaries follow the CPU workers and memory allowance; files
+remain readable by existing Radelta readers.
+
+The same streaming writer is used by the CLI, ImageJ and Python. Input planes
+are copied before a write call returns. Compression errors can surface on a
+later write or at finish, so callers must check finish before treating a file
+as saved. Closing an unfinished or failed writer joins its queued work and
+removes the temporary output.
+
+TIFF export also reads ahead in output-page order while writing the previous
+batch. `decode --memory-mib N` controls its approximate allowance (default
+2048 MiB). Two reusable output buffers together occupy at most one quarter of
+that allowance, capped at 64 MiB except for larger individual planes. The
+retention cache is limited to one quarter, capped at 256 MiB, and in-flight
+pixels plus compressed payloads use at most half, capped at 256 MiB. A plane
+that is too large for read-ahead uses the direct reader. Sequential output also
+uses direct reads when a batch cannot span multiple stored units, avoiding
+extra buffers where independent-unit parallelism would be unavailable.
+
+These are working-buffer allowances, not hard process-RSS limits. Codec models,
+scratch, TIFF directories and metadata also use memory, and at least one whole
+stored Radelta volume/chunk must fit for decoding. One unit larger than the
+allowance can therefore proceed, as with the file reader API.
+
+See [pipeline measurements](STREAM_PIPELINE_PERFORMANCE.md) for local timing,
+memory tradeoffs and a procedure for comparing real acquisitions.
 
 ## HDF5 conversion
 
