@@ -537,6 +537,9 @@ struct StaticModel {
     scale_bits: u8,
     total: usize,
     freq: Vec<u16>,
+    // Sorted nonempty contexts, derived while training or parsing. Sparse
+    // models need not rescan every empty row to serialize or build tables.
+    active_contexts: Vec<usize>,
     cum: Vec<u16>,
     // Only models trained for compression need an encoder lookup table.
     encode: Vec<EncodeSymbol>,
@@ -567,22 +570,25 @@ impl StaticModel {
             )));
         }
 
+        let mut active_contexts = Vec::new();
         let mut freq = vec![0u16; counts.len()];
         let mut cum = vec![0u16; counts.len()];
         let mut encode = vec![EncodeSymbol::default(); counts.len()];
-        let reciprocals = Self::encoding_reciprocals(total);
+        let reciprocals = Self::encoding_reciprocals(scale_bits);
+        let mut scratch = NormalizationScratch::default();
         let renorm_factor = (RANS_L >> scale_bits) << 8;
 
         for ctx in 0..contexts {
             let row = &counts[ctx * alphabet..(ctx + 1) * alphabet];
-            let f = normalize_row(row, total)?;
+            let f = &mut freq[ctx * alphabet..(ctx + 1) * alphabet];
+            normalize_row_into(row, total, f, &mut scratch)?;
             if f.iter().all(|&v| v == 0) {
                 continue;
             }
+            active_contexts.push(ctx);
             let mut c = 0usize;
             for sym in 0..alphabet {
                 let fv = f[sym] as usize;
-                freq[ctx * alphabet + sym] = f[sym];
                 cum[ctx * alphabet + sym] = c as u16;
                 if fv != 0 {
                     encode[ctx * alphabet + sym] = EncodeSymbol {
@@ -607,16 +613,18 @@ impl StaticModel {
             scale_bits,
             total,
             freq,
+            active_contexts,
             cum,
             encode,
         })
     }
 
-    fn from_freqs(
+    fn from_sparse_freqs(
         contexts: usize,
         alphabet: usize,
         scale_bits: u8,
         freq: Vec<u16>,
+        active_contexts: Vec<usize>,
     ) -> Result<Self> {
         if contexts == 0 || contexts > MAX_MODEL_CONTEXTS {
             return Err(RadeltaError(
@@ -646,7 +654,9 @@ impl StaticModel {
             )));
         }
         let mut cum = vec![0u16; freq.len()];
-        for ctx in 0..contexts {
+        // The parser starts with zeroed frequencies and only writes contexts
+        // in this checked, strictly increasing list.
+        for &ctx in &active_contexts {
             let row = &freq[ctx * alphabet..(ctx + 1) * alphabet];
             let row_sum: usize = row.iter().map(|&v| v as usize).sum();
             if row_sum == 0 {
@@ -670,16 +680,25 @@ impl StaticModel {
             scale_bits,
             total,
             freq,
+            active_contexts,
             cum,
             encode: Vec::new(),
         })
     }
 
-    fn encoding_reciprocals(total: usize) -> Vec<u64> {
-        let numerator = (total as u64) << 32;
-        std::iter::once(0)
-            .chain((1..=total).map(|freq| numerator.div_ceil(freq as u64)))
-            .collect()
+    fn encoding_reciprocals(scale_bits: u8) -> &'static [u64] {
+        // Four immutable, lazily initialized tables (about 30 KiB combined).
+        // Calibration and image content do not affect these reciprocals.
+        use std::sync::OnceLock;
+        const SCALES: usize = (MAX_SCALE_BITS - MIN_SCALE_BITS + 1) as usize;
+        static TABLES: [OnceLock<Vec<u64>>; SCALES] = [const { OnceLock::new() }; SCALES];
+        TABLES[(scale_bits - MIN_SCALE_BITS) as usize].get_or_init(|| {
+            let total = 1usize << scale_bits;
+            let numerator = (total as u64) << 32;
+            std::iter::once(0)
+                .chain((1..=total).map(|freq| numerator.div_ceil(freq as u64)))
+                .collect()
+        })
     }
 
     #[inline(always)]
@@ -709,14 +728,9 @@ impl StaticModel {
         // Contexts and symbols are sorted; the first index is absolute and
         // subsequent indices are encoded as strictly positive deltas.
         out.push(0); // reserved
-        let nonempty = self
-            .freq
-            .chunks_exact(self.alphabet)
-            .filter(|row| row.iter().any(|&f| f != 0))
-            .count();
-        put_model_varint(&mut out, nonempty as u32);
+        put_model_varint(&mut out, self.active_contexts.len() as u32);
         let mut previous_ctx = 0;
-        for ctx in 0..self.contexts {
+        for &ctx in &self.active_contexts {
             let row = &self.freq[ctx * self.alphabet..(ctx + 1) * self.alphabet];
             let nz = row.iter().filter(|&&f| f != 0).count();
             if nz == 0 {
@@ -774,6 +788,7 @@ impl StaticModel {
                 "invalid serialized model context count".into(),
             ));
         }
+        let mut active_contexts = Vec::with_capacity(nonempty);
         let mut ctx = 0usize;
         for row_index in 0..nonempty {
             let delta = read_model_varint(&mut rd)? as usize;
@@ -784,6 +799,7 @@ impl StaticModel {
                 .checked_add(delta)
                 .filter(|&value| value < contexts)
                 .ok_or_else(|| RadeltaError("serialized model context is out of range".into()))?;
+            active_contexts.push(ctx);
             let nz = read_model_varint(&mut rd)? as usize;
             if nz == 0 || nz > alphabet {
                 return Err(RadeltaError("invalid serialized model symbol count".into()));
@@ -818,7 +834,7 @@ impl StaticModel {
         if !rd.is_done() {
             return Err(RadeltaError("trailing bytes in serialized model".into()));
         }
-        Self::from_freqs(contexts, alphabet, scale_bits, freq)
+        Self::from_sparse_freqs(contexts, alphabet, scale_bits, freq, active_contexts)
     }
 }
 
@@ -848,8 +864,107 @@ fn read_model_varint(rd: &mut Reader<'_>) -> Result<u32> {
     Err(RadeltaError("unterminated serialized model varint".into()))
 }
 
+#[derive(Default)]
+struct NormalizationScratch {
+    remainders: Vec<(u128, usize)>,
+    order: Vec<usize>,
+}
+
 #[allow(clippy::unnecessary_sort_by)]
-fn normalize_row(counts: &[u64], target: usize) -> Result<Vec<u16>> {
+fn normalize_row_into(
+    counts: &[u64],
+    target: usize,
+    out: &mut [u16],
+    scratch: &mut NormalizationScratch,
+) -> Result<()> {
+    out.fill(0);
+    let sum: u128 = counts.iter().map(|&v| v as u128).sum();
+    if sum == 0 {
+        return Ok(());
+    }
+    let nz = counts.iter().filter(|&&v| v != 0).count();
+    if nz > target {
+        return Err(RadeltaError(format!(
+            "{nz} nonzero symbols exceed normalization total {target}"
+        )));
+    }
+
+    if nz == 1 {
+        out[counts.iter().position(|&v| v != 0).unwrap()] = target as u16;
+        return Ok(());
+    }
+    let rems = &mut scratch.remainders;
+    rems.clear();
+    let mut total = 0usize;
+    // Real image counts normally fit in a hardware divide. The bound covers
+    // every numerator as well as the denominator; extreme u64 counts retain
+    // the original u128 arithmetic.
+    let narrow = sum <= u64::MAX as u128 / target as u128;
+
+    for (sym, &c) in counts.iter().enumerate() {
+        if c == 0 {
+            continue;
+        }
+        let num = c as u128 * target as u128;
+        let (quotient, remainder) = if narrow {
+            (
+                (num as u64 / sum as u64) as usize,
+                (num as u64 % sum as u64) as u128,
+            )
+        } else {
+            ((num / sum) as usize, num % sum)
+        };
+        let mut base = quotient;
+        if base == 0 {
+            base = 1;
+        }
+        out[sym] = base as u16;
+        total += base;
+        rems.push((remainder, sym));
+    }
+
+    if total < target {
+        rems.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        let mut i = 0usize;
+        while total < target {
+            let sym = rems[i % rems.len()].1;
+            out[sym] = out[sym].saturating_add(1);
+            total += 1;
+            i += 1;
+        }
+    } else if total > target {
+        let order = &mut scratch.order;
+        order.clear();
+        order.extend(
+            out.iter()
+                .enumerate()
+                .filter_map(|(i, &f)| (f > 1).then_some(i)),
+        );
+        while total > target {
+            order.sort_unstable_by_key(|&i| std::cmp::Reverse(out[i]));
+            let mut changed = false;
+            for &sym in order.iter() {
+                if total == target {
+                    break;
+                }
+                if out[sym] > 1 {
+                    out[sym] -= 1;
+                    total -= 1;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Err(RadeltaError("could not normalize frequency row".into()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unnecessary_sort_by)]
+fn reference_normalize_row(counts: &[u64], target: usize) -> Result<Vec<u16>> {
     let sum: u128 = counts.iter().map(|&v| v as u128).sum();
     if sum == 0 {
         return Ok(vec![0u16; counts.len()]);
@@ -1100,7 +1215,7 @@ fn packed_q_decode_table(model: &StaticModel) -> Result<Vec<u32>> {
         ));
     }
     let mut table = vec![PACKED_INVALID; model.contexts * model.total];
-    for ctx in 0..model.contexts {
+    for &ctx in &model.active_contexts {
         let base = ctx * model.total;
         for s in 0..model.alphabet {
             let mi = ctx * model.alphabet + s;
@@ -1124,7 +1239,7 @@ fn packed_r_decode_table(model: &StaticModel) -> Result<Vec<u32>> {
         ));
     }
     let mut table = vec![PACKED_INVALID; model.contexts * model.total];
-    for ctx in 0..model.contexts {
+    for &ctx in &model.active_contexts {
         let base = ctx * model.total;
         for s in 0..model.alphabet {
             let mi = ctx * model.alphabet + s;
@@ -1933,8 +2048,17 @@ fn lossy_reconstruct(q: u8, offset_adu: f64, gain_e_per_adu: f64, noise_step: f6
     adu.round().clamp(0.0, u16::MAX as f64) as u16
 }
 
+// A pair of memory scans should not fan out into dozens of jobs for small
+// Zarr chunks. Large volumes still expose enough work for all workers.
+const MIN_PREPROCESS_VOXELS: usize = 64 * 1024;
+
 fn extract_lossy_q(input: &[u16], options: LossyOptions) -> Result<(Vec<u8>, u8)> {
-    let max_input = input.par_iter().copied().max().unwrap_or(0);
+    let max_input = input
+        .par_iter()
+        .with_min_len(MIN_PREPROCESS_VOXELS)
+        .copied()
+        .max()
+        .unwrap_or(0);
     let quantize = |v| {
         lossy_quantize(
             v,
@@ -1956,9 +2080,17 @@ fn extract_lossy_q(input: &[u16], options: LossyOptions) -> Result<(Vec<u8>, u8)
         // Amortize the table only when each possible intensity would otherwise
         // be quantized at least four times on average.
         let lookup: Vec<u8> = (0..lookup_len).map(|v| quantize(v as u16) as u8).collect();
-        input.par_iter().map(|&v| lookup[v as usize]).collect()
+        input
+            .par_iter()
+            .with_min_len(MIN_PREPROCESS_VOXELS)
+            .map(|&v| lookup[v as usize])
+            .collect()
     } else {
-        input.par_iter().map(|&v| quantize(v) as u8).collect()
+        input
+            .par_iter()
+            .with_min_len(MIN_PREPROCESS_VOXELS)
+            .map(|&v| quantize(v) as u8)
+            .collect()
     };
     Ok((q, q_max16 as u8))
 }
@@ -2152,7 +2284,12 @@ pub fn compress_u16_with_stats(
     let mode = resolved.mode;
     let scale_bits = resolved.scale_bits;
 
-    let max_x = input.par_iter().copied().max().unwrap_or(0);
+    let max_x = input
+        .par_iter()
+        .with_min_len(MIN_PREPROCESS_VOXELS)
+        .copied()
+        .max()
+        .unwrap_or(0);
     let sqrt_lut = make_sqrt_lut();
     let q_max = sqrt_lut[max_x as usize];
     let q_alphabet = q_max as usize + 1;
@@ -2160,7 +2297,11 @@ pub fn compress_u16_with_stats(
     let r_alphabet = r_max as usize + 1;
 
     let q_start = Instant::now();
-    let q: Vec<u8> = input.par_iter().map(|&v| sqrt_lut[v as usize]).collect();
+    let q: Vec<u8> = input
+        .par_iter()
+        .with_min_len(MIN_PREPROCESS_VOXELS)
+        .map(|&v| sqrt_lut[v as usize])
+        .collect();
     let seconds_q_extract = q_start.elapsed().as_secs_f64();
 
     let blocks = block_specs(dims.z, block_depth);
@@ -4372,6 +4513,8 @@ mod tests {
                 let blob = model.serialize().unwrap();
                 assert_eq!(blob[7], 0);
                 let decoded = StaticModel::deserialize(&blob).unwrap();
+                assert_eq!(model.active_contexts, [0, 129, 259]);
+                assert_eq!(decoded.active_contexts, model.active_contexts);
                 assert_eq!(decoded.freq, model.freq);
                 assert_eq!(decoded.cum, model.cum);
                 assert_eq!(decoded.contexts, contexts);
@@ -4394,6 +4537,7 @@ mod tests {
             }
         }
         let empty = StaticModel::from_counts(&[0; 24], 3, 8, 8).unwrap();
+        assert!(empty.active_contexts.is_empty());
         let blob = empty.serialize().unwrap();
         assert_eq!(blob.len(), 9);
         assert_eq!(StaticModel::deserialize(&blob).unwrap().freq, empty.freq);
@@ -4779,9 +4923,78 @@ mod tests {
     }
 
     #[test]
+    fn reused_normalization_matches_reference_including_ties_and_overflow_counts() {
+        let mut scratch = NormalizationScratch::default();
+        let mut random = 0x987654321abcdef0u64;
+        for bits in MIN_SCALE_BITS..=MAX_SCALE_BITS {
+            let target = 1usize << bits;
+            for len in [1, 2, 7, 128, 256, 511] {
+                if len > target {
+                    continue;
+                }
+                for case in 0..64 {
+                    let counts: Vec<_> = (0..len)
+                        .map(|i| {
+                            random ^= random << 13;
+                            random ^= random >> 7;
+                            random ^= random << 17;
+                            match case {
+                                0 => 0,
+                                1 => u64::MAX,
+                                2 => {
+                                    if i == len / 2 {
+                                        u64::MAX
+                                    } else {
+                                        0
+                                    }
+                                }
+                                3 => {
+                                    if i == 0 {
+                                        u64::MAX
+                                    } else {
+                                        1
+                                    }
+                                }
+                                4 => 1,
+                                _ => {
+                                    if random & 3 == 0 {
+                                        0
+                                    } else {
+                                        random % 1000
+                                    }
+                                }
+                            }
+                        })
+                        .collect();
+                    let mut actual = vec![u16::MAX; len];
+                    normalize_row_into(&counts, target, &mut actual, &mut scratch).unwrap();
+                    assert_eq!(
+                        actual,
+                        reference_normalize_row(&counts, target).unwrap(),
+                        "bits={bits}, len={len}, case={case}"
+                    );
+                }
+            }
+            let table = StaticModel::encoding_reciprocals(bits);
+            assert!(std::ptr::eq(table, StaticModel::encoding_reciprocals(bits)));
+            assert_eq!(table[0], 0);
+            for (freq, &reciprocal) in table.iter().enumerate().skip(1) {
+                assert_eq!(reciprocal, ((target as u64) << 32).div_ceil(freq as u64));
+            }
+        }
+    }
+
+    #[test]
     fn normalized_nonempty_rows_sum_to_rans_total() {
         let counts = [100u64, 20, 3, 0, 1, 0, 7];
-        let freq = normalize_row(&counts, 256).unwrap();
+        let mut freq = vec![0; counts.len()];
+        normalize_row_into(
+            &counts,
+            256,
+            &mut freq,
+            &mut NormalizationScratch::default(),
+        )
+        .unwrap();
         assert_eq!(freq.iter().map(|&v| v as usize).sum::<usize>(), 256);
         for (&count, &f) in counts.iter().zip(freq.iter()) {
             assert_eq!(count == 0, f == 0);

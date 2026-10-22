@@ -54,8 +54,11 @@ def main():
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--batches", type=int, default=3)
+    parser.add_argument("--small-chunks", action="store_true", help="benchmark 2/32/128 KiB chunks instead of full volumes")
     parser.add_argument("--verify-options", action="store_true", help="also compare 120 context/precision/depth/mode combinations")
     args = parser.parse_args()
+    if args.small_chunks and args.tiff:
+        parser.error("--small-chunks and --tiff select different benchmark suites")
     if min(args.workers, args.repeats, args.batches) < 1:
         parser.error("workers, repeats and batches must be positive")
     os.environ["RAYON_NUM_THREADS"] = str(args.workers)
@@ -70,16 +73,26 @@ def main():
         pixels = tifffile.imread(args.tiff)
         if pixels.ndim != 3 or pixels.dtype.kind != "u" or pixels.dtype.itemsize != 2:
             parser.error("--tiff must contain a uint16 ZYX stack")
-        cases.append(("microscopy", pixels))
-    cases.extend([
-        ("poisson", rng.poisson(80, (32, 512, 512)).astype(np.uint16)),
-        ("noise", rng.integers(0, 65536, (32, 512, 512), dtype=np.uint16)),
-        ("small", rng.poisson(80, (4, 128, 128)).astype(np.uint16)),
-    ])
+        cases.append(("microscopy", pixels, 2))
+    if not args.small_chunks:
+        cases.extend([
+            ("poisson", rng.poisson(80, (32, 512, 512)).astype(np.uint16), 2),
+            ("noise", rng.integers(0, 65536, (32, 512, 512), dtype=np.uint16), 2),
+            ("small", rng.poisson(80, (4, 128, 128)).astype(np.uint16), 2),
+        ])
+    if args.small_chunks:
+        rng = np.random.default_rng(725)
+        cases = [
+            ("tiny", rng.poisson(80, (1, 32, 32)).astype(np.uint16), 2),
+            ("small", rng.poisson(80, (4, 128, 128)).astype(np.uint16), 2),
+        ]
+        sparse = rng.integers(0, 65536, (4, 64, 64), dtype=np.uint16)
+        sparse[:, :, :60] = 0
+        cases.extend([("sparse-wide", sparse, 2), ("sparse-wide-signed3", sparse, 3)])
     results = {}
     print("| Workload | Encode before / after (ms) | Speedup | Decode before / after (ms) | Speedup |", flush=True)
     print("|---|---:|---:|---:|---:|", flush=True)
-    for name, pixels in cases:
+    for name, pixels, context in cases:
         raw = args.work_dir / (name + ".u16")
         pixels.astype("<u2").tofile(raw)
         z, y, x = pixels.shape
@@ -91,7 +104,7 @@ def main():
                     encoded = args.work_dir / f"{name}-{mode}-{i}.rdlt"
                     binary = [args.baseline, args.candidate][i]
                     run = subprocess.run([str(binary.resolve()), str(raw.resolve()), str(x), str(y), str(z),
-                        mode, str(args.repeats), "2", "10", "4", str(encoded.resolve())],
+                        mode, str(args.repeats), str(context), "10", "4", str(encoded.resolve())],
                         text=True, capture_output=True, check=True)
                     (args.work_dir / f"{name}-{mode}-{i}-{batch}.csv").write_text(run.stdout)
                     samples[i].extend(dict(row) for row in csv.DictReader(io.StringIO(run.stdout)))
@@ -103,7 +116,7 @@ def main():
             dec = [m["decode_seconds"] * 1000 for m in medians]
             print(f"| {name} {mode} | {enc[0]:.3f} / {enc[1]:.3f} | {enc[0]/enc[1]:.2f}× | "
                   f"{dec[0]:.3f} / {dec[1]:.3f} | {dec[0]/dec[1]:.2f}× |", flush=True)
-            results[name + " " + mode] = dict(shape=list(pixels.shape), raw_bytes=pixels.nbytes,
+            results[name + " " + mode] = dict(shape=list(pixels.shape), context=context, raw_bytes=pixels.nbytes,
                 sha256=next(iter(hashes)), before=medians[0], after=medians[1])
     (args.work_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     if args.verify_options:
