@@ -57,18 +57,26 @@ def decompress(encoded, *, max_output_bytes=None):
     Other streams use canonical TCZYX order with leading singleton T/C/Z axes
     omitted. Streaming files should be read using open() or read().
     """
-    source = bytes_buffer(encoded)
+    if isinstance(encoded, bytes):
+        # bytes are immutable and remain owned by this call. Explicit lengths
+        # preserve embedded NULs; no encoded-image copy is needed for ctypes.
+        source = ct.cast(ct.c_char_p(encoded), U8)
+        input_size = len(encoded)
+    else:
+        # Retain snapshot semantics for mutable/non-contiguous buffer inputs.
+        source = bytes_buffer(encoded)
+        input_size = len(source)
     dll = library()
     count, dims = ct.c_size_t(), [ct.c_uint32() for _ in range(5)]
-    status = dll.radelta_decompress_u16_nd(source, len(source), None, 0, ct.byref(count),
+    status = dll.radelta_decompress_u16_nd(source, input_size, None, 0, ct.byref(count),
                                         *(ct.byref(d) for d in dims))
     if status != 1:
         raise ValueError("Invalid or unsupported Radelta stream")
     canonical = tuple(d.value for d in dims)[::-1]
-    shape, axes, dtype, _ = unpack_layout(metadata_bytes(dll.radelta_get_metadata, source, len(source)), canonical)
+    shape, axes, dtype, _ = unpack_layout(metadata_bytes(dll.radelta_get_metadata, source, input_size), canonical)
     check_output_size(shape, max_output_bytes)
     output = np.empty(canonical, dtype=np.uint16)
-    status = dll.radelta_decompress_u16_nd(source, len(source), pixel_pointer(output), output.size,
+    status = dll.radelta_decompress_u16_nd(source, input_size, pixel_pointer(output), output.size,
                                         ct.byref(count), *(ct.byref(d) for d in dims))
     if status != 0:
         raise ValueError("Corrupt Radelta stream")

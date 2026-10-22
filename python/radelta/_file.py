@@ -93,7 +93,11 @@ class Dataset:
         plane = np.empty(self._dims[-2:], dtype=np.uint16)
         check_file(library().radelta_file_read_plane_u16(self._handle, t, c, z,
                                                        pixel_pointer(plane), plane.size))
-        return plane[np.ix_(list(ys), list(xs))]
+        # Basic slicing returns a view; advanced indexing copied the selected
+        # plane before __getitem__ copied it again into the result.
+        def selected_slice(r):
+            return slice(r.start, None if r.step < 0 and r.stop < 0 else r.stop, r.step)
+        return plane[selected_slice(ys), selected_slice(xs)]
 
     def __getitem__(self, key):
         with self._lock:
@@ -126,9 +130,17 @@ class Dataset:
             ranges = [selected.get(a, range(1)) for a in "tczyx"]
             output = np.empty(tuple(map(len, ranges)), dtype=np.uint16)
             if output.size:
+                full_xy = (self._h5 is None and ranges[3] == range(self._dims[-2])
+                           and ranges[4] == range(self._dims[-1]))
                 for ot, oc, oz in np.ndindex(output.shape[:3]):
-                    output[ot, oc, oz] = self._plane(ranges[0][ot], ranges[1][oc], ranges[2][oz],
-                                                     ranges[3], ranges[4])
+                    if full_xy:
+                        plane = output[ot, oc, oz]
+                        check_file(library().radelta_file_read_plane_u16(
+                            self._handle, ranges[0][ot], ranges[1][oc], ranges[2][oz],
+                            pixel_pointer(plane), plane.size))
+                    else:
+                        output[ot, oc, oz] = self._plane(ranges[0][ot], ranges[1][oc], ranges[2][oz],
+                                                       ranges[3], ranges[4])
             order = ["tczyx".index(a) for a in self.axes] + [i for i, a in enumerate("tczyx") if a not in self.axes]
             result = output.transpose(order).reshape(tuple(len(selected[a]) for a in self.axes))
             result = result.astype(self.dtype, copy=False)

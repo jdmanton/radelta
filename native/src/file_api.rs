@@ -8,7 +8,7 @@
 
 use super::{
     choose_stream_chunk_depth, compress_lossy_u16, compress_u16, decompress_u16_expecting,
-    inspect_dims, Dims, Dims5, LossyOptions, Options, DEFAULT_BLOCK_DEPTH,
+    inspect_dims, Dims, Dims5, LossyOptions, Options, Reader, DEFAULT_BLOCK_DEPTH,
     DEFAULT_STREAM_MEMORY_MIB, LOSSY_VERSION, MAGIC, MAGIC_LOSSY, MAGIC_ND, MAGIC_ND_LOSSY,
     ND_VERSION, RADELTA_CODEC_ERROR, RADELTA_INVALID_ARGUMENT, RADELTA_OK, STREAM_MAGIC_LOSSLESS,
     STREAM_MAGIC_LOSSY, STREAM_VERSION, VERSION,
@@ -211,23 +211,19 @@ const PAYLOAD_HEADER_BYTES: u64 = 20;
 /// container. A file whose container and payload shapes disagree is rejected
 /// at open, before any caller sizes plane buffers from the container header.
 fn check_payload_header(
-    file: &mut File,
-    seg: Segment,
+    header: &[u8],
+    payload_len: u64,
     lossy: bool,
     expected: Dims,
 ) -> std::result::Result<(), String> {
-    if seg.len < PAYLOAD_HEADER_BYTES {
+    if payload_len < PAYLOAD_HEADER_BYTES {
         return Err("truncated Radelta payload header".into());
     }
-    let mut header = [0u8; PAYLOAD_HEADER_BYTES as usize];
-    file.seek(SeekFrom::Start(seg.offset))
-        .map_err(|e| e.to_string())?;
-    file.read_exact(&mut header).map_err(|e| e.to_string())?;
     let magic = if lossy { MAGIC_LOSSY } else { MAGIC };
     if &header[..4] != magic {
         return Err("Radelta payload mode does not match its container".into());
     }
-    let found = inspect_dims(&header).map_err(|e| e.to_string())?;
+    let found = inspect_dims(header).map_err(|e| e.to_string())?;
     if found != expected {
         return Err(format!(
             "Radelta payload dimensions {}x{}x{} do not match container {}x{}x{}",
@@ -235,6 +231,36 @@ fn check_payload_header(
         ));
     }
     Ok(())
+}
+
+/// Read exactly a record header plus its embedded pixel header. Positioned
+/// reads avoid cursor queries/seeks and do not prefetch any pixel payload.
+fn index_prefix<const N: usize>(file: &mut File, offset: u64) -> std::io::Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    #[cfg(unix)]
+    std::os::unix::fs::FileExt::read_exact_at(file, &mut bytes, offset)?;
+    #[cfg(windows)]
+    {
+        let mut done = 0;
+        while done < N {
+            match std::os::windows::fs::FileExt::seek_read(
+                file,
+                &mut bytes[done..],
+                offset + done as u64,
+            ) {
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => done += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut bytes)?;
+    }
+    Ok(bytes)
 }
 
 fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
@@ -308,7 +334,8 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
         let lossy = &magic == MAGIC_ND_LOSSY;
         // Each record needs a length and at least an embedded volume header.
         // Check file bounds before trusting a count as an allocation size.
-        let remaining = len.saturating_sub(file.stream_position().map_err(|e| e.to_string())?);
+        let mut cursor = 32u64;
+        let remaining = len.saturating_sub(cursor);
         if nvol as u64 > remaining / (8 + PAYLOAD_HEADER_BYTES) {
             return Err("multidimensional volume count exceeds available file records".into());
         }
@@ -317,8 +344,12 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
             .try_reserve_exact(nvol)
             .map_err(|_| "cannot allocate Radelta volume index")?;
         for _ in 0..nvol {
-            let slen = read_u64(&mut file).map_err(|e| e.to_string())?;
-            let off = file.stream_position().map_err(|e| e.to_string())?;
+            let prefix = index_prefix::<28>(&mut file, cursor).map_err(|e| e.to_string())?;
+            let mut rd = Reader::new(&prefix);
+            let slen = rd.u64().map_err(|e| e.to_string())?;
+            let off = cursor
+                .checked_add(8)
+                .ok_or("substream file offset overflow")?;
             let end = off
                 .checked_add(slen)
                 .ok_or("substream file offset overflow")?;
@@ -329,11 +360,11 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
                 offset: off,
                 len: slen,
             };
-            check_payload_header(&mut file, seg, lossy, d.volume_dims())?;
+            check_payload_header(&prefix[8..], slen, lossy, d.volume_dims())?;
             streams.push(seg);
-            file.seek(SeekFrom::Start(end)).map_err(|e| e.to_string())?;
+            cursor = end;
         }
-        if file.stream_position().map_err(|e| e.to_string())? != len {
+        if cursor != len {
             return Err("trailing bytes after Radelta volumes".into());
         }
         return Ok(RadeltaFileHandle {
@@ -385,7 +416,8 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
             ));
         }
         let lossy = &magic == STREAM_MAGIC_LOSSY;
-        let remaining = len.saturating_sub(file.stream_position().map_err(|e| e.to_string())?);
+        let mut cursor = 40u64;
+        let remaining = len.saturating_sub(cursor);
         if nchunks > remaining / (24 + PAYLOAD_HEADER_BYTES) {
             return Err("streaming chunk count exceeds available file records".into());
         }
@@ -394,12 +426,14 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
             .try_reserve_exact(nchunks_usize)
             .map_err(|_| "cannot allocate Radelta chunk index")?;
         for index in 0..nchunks_usize {
-            let t = read_u32(&mut file).map_err(|e| e.to_string())? as usize;
-            let c = read_u32(&mut file).map_err(|e| e.to_string())? as usize;
-            let z0 = read_u32(&mut file).map_err(|e| e.to_string())? as usize;
-            let depth = read_u32(&mut file).map_err(|e| e.to_string())? as usize;
-            let plen = read_u64(&mut file).map_err(|e| e.to_string())?;
-            let off = file.stream_position().map_err(|e| e.to_string())?;
+            let prefix = index_prefix::<44>(&mut file, cursor).map_err(|e| e.to_string())?;
+            let mut rd = Reader::new(&prefix);
+            let t = rd.u32().map_err(|e| e.to_string())? as usize;
+            let c = rd.u32().map_err(|e| e.to_string())? as usize;
+            let z0 = rd.u32().map_err(|e| e.to_string())? as usize;
+            let depth = rd.u32().map_err(|e| e.to_string())? as usize;
+            let plen = rd.u64().map_err(|e| e.to_string())?;
+            let off = cursor.checked_add(24).ok_or("chunk file offset overflow")?;
             let end = off.checked_add(plen).ok_or("chunk file offset overflow")?;
             if end > len {
                 return Err("truncated streaming Radelta chunk".into());
@@ -420,11 +454,8 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
                 return Err("streaming Radelta chunks must follow canonical TCZ layout".into());
             }
             check_payload_header(
-                &mut file,
-                Segment {
-                    offset: off,
-                    len: plen,
-                },
+                &prefix[24..],
+                plen,
                 lossy,
                 Dims {
                     x: d.x,
@@ -440,9 +471,9 @@ fn open_impl(path: PathBuf) -> std::result::Result<RadeltaFileHandle, String> {
                 offset: off,
                 len: plen,
             });
-            file.seek(SeekFrom::Start(end)).map_err(|e| e.to_string())?;
+            cursor = end;
         }
-        if file.stream_position().map_err(|e| e.to_string())? != len {
+        if cursor != len {
             return Err("trailing bytes after Radelta chunks".into());
         }
         return Ok(RadeltaFileHandle {

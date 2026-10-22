@@ -916,16 +916,15 @@ fn normalize_row(counts: &[u64], target: usize) -> Result<Vec<u16>> {
     Ok(out)
 }
 
-fn make_sqrt_lut() -> Vec<u8> {
-    let mut lut = vec![0u8; 65536];
-    let mut q: u32 = 0;
-    for x in 0u32..=65535 {
-        while (q + 1) * (q + 1) <= x {
-            q += 1;
+fn make_sqrt_lut() -> &'static [u8; 65536] {
+    static LUT: std::sync::OnceLock<[u8; 65536]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut lut = [0u8; 65536];
+        for q in 0usize..256 {
+            lut[q * q..(q + 1) * (q + 1)].fill(q as u8);
         }
-        lut[x as usize] = q as u8;
-    }
-    lut
+        lut
+    })
 }
 
 #[inline(always)]
@@ -3024,6 +3023,15 @@ mod tests {
                 state as u16
             })
             .collect()
+    }
+
+    #[test]
+    fn sqrt_lookup_is_exact_for_every_uint16() {
+        let lut = make_sqrt_lut();
+        for (value, &q) in lut.iter().enumerate() {
+            let q = q as usize;
+            assert!(q * q <= value && (q + 1) * (q + 1) > value);
+        }
     }
 
     #[test]

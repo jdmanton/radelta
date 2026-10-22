@@ -14,6 +14,19 @@ from radelta._native import U8, library, pixel_pointer
 
 
 class ArrayTests(unittest.TestCase):
+    def test_decompress_accepts_immutable_mutable_and_strided_buffers(self):
+        image = np.arange(105, dtype=np.uint16).reshape(3, 5, 7) * 317
+        encoded = radelta.compress(image)
+        strided = memoryview(bytearray(2 * len(encoded)))[::2]
+        strided[:] = encoded
+        for source in (encoded, bytearray(encoded), memoryview(encoded), strided):
+            before = bytes(source)
+            np.testing.assert_array_equal(radelta.decompress(source), image)
+            self.assertEqual(bytes(source), before)
+        for source in (b"", bytearray(), memoryview(b"")):
+            with self.assertRaises(ValueError):
+                radelta.decompress(source)
+
     def test_metadata_attachment_keeps_native_buffer_alive_and_frees_original_size(self):
         dll = library()
         allocated, freed = [], []
@@ -112,6 +125,17 @@ class ArrayTests(unittest.TestCase):
 
 
 class FileTests(unittest.TestCase):
+    def test_xy_slices_and_full_planes_match_numpy(self):
+        image = np.arange(3 * 7 * 9, dtype=np.uint16).reshape(3, 7, 9)
+        path = self.root / "slices.rdlt"
+        radelta.write(path, image)
+        slices = [slice(None), slice(None, None, -1), slice(None, None, -2),
+                  slice(1, None, 2), slice(-2, None, -2), slice(-20, 20, 3),
+                  slice(20, -20, -3), slice(5, 1, -2), slice(0, 0), slice(-1, -1, -1)]
+        with radelta.open(path) as source:
+            for z, y, x in itertools.product([slice(None), slice(None, None, -1), 1], slices, slices):
+                np.testing.assert_array_equal(source[z, y, x], image[z, y, x])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
