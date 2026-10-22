@@ -21,7 +21,7 @@ pub struct TiffMetadata {
     pub layout_valid: bool,
 }
 fn structural(id: u16) -> bool {
-    matches!(id, 254..=259 | 263..=266 | 273 | 277..=281 | 284 | 288..=293 | 317 | 320..=325 | 330 | 338..=339 | 347 | 512..=521 | 529..=532)
+    matches!(id, 254..=259 | 263..=266 | 273 | 277..=281 | 284 | 288..=293 | 317 | 321..=325 | 330 | 338..=339 | 347 | 512..=521 | 529..=532)
 }
 fn pointer(id: u16, ty: u16) -> bool {
     matches!(id, 34665 | 34853 | 40965) || matches!(ty, 13 | 18)
@@ -306,6 +306,14 @@ impl TiffMetadata {
     pub fn has_description(&self) -> bool {
         self.tags[0].iter().any(|t| t.id == 270)
     }
+    fn imagej_description(&self) -> bool {
+        self.tags[0].iter().any(|t| {
+            t.id == 270
+                && String::from_utf8_lossy(&t.bytes)
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("ImageJ="))
+        })
+    }
 }
 fn write_tag<W: Write + Seek, K: TiffKind>(
     enc: &mut DirectoryEncoder<'_, W, K>,
@@ -433,6 +441,12 @@ pub fn write(
     let preserve = saved
         .as_ref()
         .is_some_and(|m| m.layout_valid && m.mapping == mapping);
+    if let Some(m) = saved
+        .as_ref()
+        .filter(|m| preserve && m.imagej_description())
+    {
+        return write_imagej_layout(path, d, &mapping, m, &mut plane_reader);
+    }
     let size = (d.voxels().map_err(|e| e.to_string())? as u64)
         .checked_mul(2)
         .and_then(|v| v.checked_add(metadata.len() as u64))
@@ -467,6 +481,147 @@ pub fn write(
     }
     writer.flush().map_err(|e| e.to_string())
 }
+
+/// ImageJ trusts `images=N` and reads consecutive planes from the first strip
+/// offset. Keep all IFDs and their values before that pixel block, including
+/// nested metadata directories. Use the TIFF encoder for directory serialization
+/// rather than duplicating its tag types, alignment and pointer handling.
+fn write_imagej_prefix<W: Write + Seek>(
+    out: &mut W,
+    d: Dims5,
+    m: &TiffMetadata,
+    pages: usize,
+    first_strip: u64,
+) -> Result<u64, String> {
+    let width = u32::try_from(d.x).map_err(|_| "TIFF width exceeds u32")?;
+    let height = u32::try_from(d.y).map_err(|_| "TIFF height exceeds u32")?;
+    let plane_bytes =
+        d.x.checked_mul(d.y)
+            .and_then(|n| n.checked_mul(2))
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or("ImageJ TIFF plane must be smaller than 4 GiB")?;
+    {
+        let mut enc = TiffEncoder::new(&mut *out).map_err(|e| e.to_string())?;
+        for page in 0..pages {
+            let tags = prepare(&mut enc, m.page_tags(page))?;
+            let offset = (page as u64)
+                .checked_mul(u64::from(plane_bytes))
+                .and_then(|n| first_strip.checked_add(n))
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or("ImageJ TIFF strip offset exceeds u32")?;
+            let mut dir = enc.image_directory().map_err(|e| e.to_string())?;
+            macro_rules! tag {
+                ($tag:ident, $value:expr) => {
+                    dir.write_tag(Tag::$tag, $value)
+                        .map_err(|e| e.to_string())?
+                };
+            }
+            tag!(ImageWidth, width);
+            tag!(ImageLength, height);
+            tag!(BitsPerSample, 16u16);
+            tag!(Compression, 1u16);
+            tag!(PhotometricInterpretation, 1u16);
+            tag!(StripOffsets, offset);
+            tag!(SamplesPerPixel, 1u16);
+            tag!(RowsPerStrip, height);
+            tag!(StripByteCounts, plane_bytes);
+            tag!(SampleFormat, 1u16);
+            for tag in &tags {
+                if !structural(tag.id) {
+                    write_tag(&mut dir, tag)?;
+                }
+            }
+            dir.finish().map_err(|e| e.to_string())?;
+        }
+    }
+    let size = out.stream_position().map_err(|e| e.to_string())?;
+    if size % 2 != 0 {
+        out.write_all(&[0]).map_err(|e| e.to_string())?;
+    }
+    Ok(size + size % 2)
+}
+
+/// Measure a directory prefix without retaining it or allocating pixel storage.
+/// TIFF serialization seeks back to patch links, so track both position and end.
+#[derive(Default)]
+struct PrefixSize {
+    position: u64,
+    end: u64,
+}
+impl Write for PrefixSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.position = self
+            .position
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| std::io::Error::other("TIFF prefix size overflow"))?;
+        self.end = self.end.max(self.position);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl Seek for PrefixSize {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        self.position = match from {
+            SeekFrom::Start(n) => Some(n),
+            SeekFrom::Current(n) => self.position.checked_add_signed(n),
+            SeekFrom::End(n) => self.end.checked_add_signed(n),
+        }
+        .ok_or_else(|| std::io::Error::other("invalid TIFF prefix seek"))?;
+        Ok(self.position)
+    }
+}
+
+fn imagej_header_plan(d: Dims5, m: &TiffMetadata, pages: usize) -> Result<(usize, u64), String> {
+    let data_bytes = (d.voxels().map_err(|e| e.to_string())? as u64)
+        .checked_mul(2)
+        .ok_or("TIFF size overflow")?;
+    // Offset values have fixed TIFF types, so substituting their final values
+    // does not change the prefix size. Beyond classic TIFF's address space,
+    // ImageJ uses a single IFD plus the description's logical plane count.
+    let mut ifds = if data_bytes > u64::from(u32::MAX) {
+        1
+    } else {
+        pages
+    };
+    let mut size = write_imagej_prefix(&mut PrefixSize::default(), d, m, ifds, 0)?;
+    if ifds > 1 && size.checked_add(data_bytes).ok_or("TIFF size overflow")? > u64::from(u32::MAX) {
+        ifds = 1;
+        size = write_imagej_prefix(&mut PrefixSize::default(), d, m, ifds, 0)?;
+    }
+    Ok((ifds, size))
+}
+
+fn write_imagej_layout(
+    path: &Path,
+    d: Dims5,
+    mapping: &[usize],
+    m: &TiffMetadata,
+    read: &mut impl FnMut(usize, &mut [u16]) -> Result<(), String>,
+) -> Result<(), String> {
+    let (ifds, data_start) = imagej_header_plan(d, m, mapping.len())?;
+    let plane_len = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
+    let mut plane = Vec::new();
+    plane
+        .try_reserve_exact(plane_len)
+        .map_err(|_| format!("cannot allocate a {}x{} plane buffer", d.x, d.y))?;
+    plane.resize(plane_len, 0u16);
+    let mut out =
+        BufWriter::with_capacity(1024 * 1024, File::create(path).map_err(|e| e.to_string())?);
+    if write_imagej_prefix(&mut out, d, m, ifds, data_start)? != data_start {
+        return Err("ImageJ TIFF prefix size changed while resolving strip offsets".into());
+    }
+    for &canonical in mapping {
+        read(canonical, &mut plane)?;
+        // TiffEncoder writes a native-endian header; the initialized u16
+        // storage has the same byte order and needs no per-pixel conversion.
+        out.write_all(tiff_io::u16_bytes_mut(&mut plane))
+            .map_err(|e| e.to_string())?;
+    }
+    out.flush().map_err(|e| e.to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_pages<W: Write + Seek, K: TiffKind>(
     enc: &mut TiffEncoder<W, K>,
@@ -554,4 +709,80 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
         image.write_data(&plane).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod imagej_tests {
+    use super::*;
+
+    fn metadata(extra: usize) -> TiffMetadata {
+        TiffMetadata {
+            tags: vec![vec![SavedTag {
+                id: 270,
+                ty: 2,
+                bytes: [
+                    b"ImageJ=1.54\nimages=2\n".as_slice(),
+                    &vec![b' '; extra],
+                    &[0],
+                ]
+                .concat(),
+                children: Vec::new(),
+            }]],
+            ..TiffMetadata::default()
+        }
+    }
+
+    #[test]
+    fn large_imagej_header_uses_one_ifd_without_allocating_pixels() {
+        // First: 4 GiB of pixels. Second: pixels fit u32, but metadata pushes
+        // the file beyond it. Neither may emit wrapped strip offsets.
+        for (x, extra) in [(65536, 0), (65535, 70_000)] {
+            let d = Dims5 {
+                x,
+                y: 16384,
+                z: 2,
+                c: 1,
+                t: 1,
+            };
+            let m = metadata(extra);
+            let (ifds, offset) = imagej_header_plan(d, &m, 2).unwrap();
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            assert_eq!(
+                write_imagej_prefix(&mut cursor, d, &m, ifds, offset).unwrap(),
+                offset
+            );
+            let prefix = cursor.into_inner();
+            let mut dec = Decoder::new(std::io::Cursor::new(&prefix)).unwrap();
+            assert_eq!(
+                dec.get_tag_u64(Tag::StripOffsets).unwrap(),
+                prefix.len() as u64
+            );
+            assert_eq!(
+                dec.get_tag_u64(Tag::StripByteCounts).unwrap(),
+                (x * d.y * 2) as u64
+            );
+            assert_eq!(
+                dec.get_tag_ascii_string(Tag::ImageDescription)
+                    .unwrap()
+                    .lines()
+                    .nth(1),
+                Some("images=2")
+            );
+            assert!(!dec.more_images());
+        }
+    }
+
+    #[test]
+    fn imagej_rejects_a_plane_exceeding_classic_tiff_byte_count() {
+        let d = Dims5 {
+            x: 65536,
+            y: 32768,
+            z: 2,
+            c: 1,
+            t: 1,
+        };
+        assert!(imagej_header_plan(d, &metadata(0), 2)
+            .unwrap_err()
+            .contains("plane"));
+    }
 }

@@ -1178,14 +1178,20 @@ fn rans_encode_prepared<const DEFAULT: bool>(
     *state = x + quotient * symbol.complement as u32 + symbol.cum as u32;
 }
 
-// A group of four zero symbols has mean context zero when all its causal
+// A span of zero symbols has mean context zero when all its causal
 // neighbors are zero. Callers exclude the special first row/column.
 #[inline(always)]
-fn zero_q_neighborhood(q: &[u8], i: usize, width: usize, plane: usize, local_z: usize) -> bool {
-    q[i..i + 4] == [0; 4]
+fn zero_q_neighborhood<const N: usize>(
+    q: &[u8],
+    i: usize,
+    width: usize,
+    plane: usize,
+    local_z: usize,
+) -> bool {
+    q[i..i + N] == [0; N]
         && q[i - 1] == 0
-        && q[i - width..i - width + 4] == [0; 4]
-        && (local_z == 0 || q[i - plane..i - plane + 4] == [0; 4])
+        && q[i - width..i - width + N] == [0; N]
+        && (local_z == 0 || q[i - plane..i - plane + N] == [0; N])
 }
 
 #[inline(always)]
@@ -1408,6 +1414,20 @@ fn decode_r_packed_one<const DEFAULT: bool>(
     Ok(())
 }
 
+// Several batches per worker let Rayon balance bright and empty slabs. Bound
+// extra private tables by 64 MiB; very large models keep the previous one-table
+// per worker limit, and a single worker never needs balancing overhead.
+fn histogram_grain(blocks: usize, entries: usize) -> usize {
+    let workers = rayon::current_num_threads();
+    if workers == 1 {
+        return blocks;
+    }
+    let bytes = entries.saturating_mul(std::mem::size_of::<u64>()).max(1);
+    let budget_batches = (64 * 1024 * 1024 / bytes).max(workers);
+    let batches = workers.saturating_mul(4).min(budget_batches).min(blocks);
+    blocks.div_ceil(batches)
+}
+
 fn block_specs(z: usize, block_depth: usize) -> Vec<BlockSpec> {
     let mut out = Vec::new();
     let mut z0 = 0usize;
@@ -1454,9 +1474,18 @@ fn accumulate_block_counts<const DEFAULT: bool>(
                 accumulate_one!(0);
                 let mut x = 1;
                 while x + 4 <= dims.x {
-                    if y > 0 && zero_q_neighborhood(q, row + x, dims.x, plane, lz) {
-                        acc.q[0] += 4;
-                        acc.r[0] += 4;
+                    if y > 0 && zero_q_neighborhood::<4>(q, row + x, dims.x, plane, lz) {
+                        let run = if x + 16 <= dims.x
+                            && zero_q_neighborhood::<16>(q, row + x, dims.x, plane, lz)
+                        {
+                            16
+                        } else {
+                            4
+                        };
+                        acc.q[0] += run as u64;
+                        acc.r[0] += run as u64;
+                        x += run;
+                        continue;
                     } else {
                         accumulate_one!(x);
                         accumulate_one!(x + 1);
@@ -1546,7 +1575,8 @@ fn encode_block<const DEFAULT: bool>(
                 while x >= 4 {
                     x -= 4;
                     if let Some(symbol) = zero_symbol {
-                        if x > 0 && y > 0 && zero_q_neighborhood(q, row + x, dims.x, plane, lz) {
+                        if x > 0 && y > 0 && zero_q_neighborhood::<4>(q, row + x, dims.x, plane, lz)
+                        {
                             rans_encode_prepared::<true>(
                                 &mut q_states[3],
                                 &mut q_bytes,
@@ -1907,8 +1937,17 @@ fn accumulate_q_block_counts<const DEFAULT: bool>(
                 accumulate_one!(0);
                 let mut x = 1;
                 while x + 4 <= dims.x {
-                    if y > 0 && zero_q_neighborhood(q, row + x, dims.x, plane, lz) {
-                        acc[0] += 4;
+                    if y > 0 && zero_q_neighborhood::<4>(q, row + x, dims.x, plane, lz) {
+                        let run = if x + 16 <= dims.x
+                            && zero_q_neighborhood::<16>(q, row + x, dims.x, plane, lz)
+                        {
+                            16
+                        } else {
+                            4
+                        };
+                        acc[0] += run as u64;
+                        x += run;
+                        continue;
                     } else {
                         accumulate_one!(x);
                         accumulate_one!(x + 1);
@@ -1979,7 +2018,8 @@ fn encode_q_only_block<const DEFAULT: bool>(
                 while x >= 4 {
                     x -= 4;
                     if let Some(symbol) = zero_symbol {
-                        if x > 0 && y > 0 && zero_q_neighborhood(q, row + x, dims.x, plane, lz) {
+                        if x > 0 && y > 0 && zero_q_neighborhood::<4>(q, row + x, dims.x, plane, lz)
+                        {
                             rans_encode_prepared::<true>(
                                 &mut q_states[3],
                                 &mut q_bytes,
@@ -2051,6 +2091,61 @@ fn lossy_reconstruct(q: u8, offset_adu: f64, gain_e_per_adu: f64, noise_step: f6
 // A pair of memory scans should not fan out into dozens of jobs for small
 // Zarr chunks. Large volumes still expose enough work for all workers.
 const MIN_PREPROCESS_VOXELS: usize = 64 * 1024;
+
+// Once the raw input exceeds 64 MiB, avoiding a second full input pass is
+// useful. Smaller, cache-resident chunks retain the simpler mapping loop.
+fn extract_lossless_q(input: &[u16]) -> (Vec<u8>, u8) {
+    if input.len() >= 32 * 1024 * 1024 {
+        return extract_lossless_q_fused(input);
+    }
+    let lookup = make_sqrt_lut();
+    let maximum = input
+        .par_iter()
+        .with_min_len(MIN_PREPROCESS_VOXELS)
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let q = input
+        .par_iter()
+        .with_min_len(MIN_PREPROCESS_VOXELS)
+        .map(|&pixel| lookup[pixel as usize])
+        .collect();
+    (q, lookup[maximum as usize])
+}
+
+// Produce q and its maximum in one input pass. Each output chunk has exactly
+// the input chunk's length; the reduction is independent of scheduling.
+fn extract_lossless_q_fused(input: &[u16]) -> (Vec<u8>, u8) {
+    let lookup = make_sqrt_lut();
+    let mut q = vec![0; input.len()];
+    let maximum = q
+        .par_chunks_mut(MIN_PREPROCESS_VOXELS)
+        .zip(input.par_chunks(MIN_PREPROCESS_VOXELS))
+        .map(|(output, pixels)| {
+            let mut maximum = 0;
+            let prefix = pixels.len().min(1024);
+            for (value, &pixel) in output[..prefix].iter_mut().zip(&pixels[..prefix]) {
+                *value = lookup[pixel as usize];
+                maximum = maximum.max(*value);
+            }
+            if maximum == u8::MAX {
+                // A proven maximum cannot increase. Full-range inputs can
+                // map the remainder without maintaining a reduction chain.
+                for (value, &pixel) in output[prefix..].iter_mut().zip(&pixels[prefix..]) {
+                    *value = lookup[pixel as usize];
+                }
+            } else {
+                for (value, &pixel) in output[prefix..].iter_mut().zip(&pixels[prefix..]) {
+                    *value = lookup[pixel as usize];
+                    maximum = maximum.max(*value);
+                }
+            }
+            maximum
+        })
+        .max()
+        .unwrap_or(0);
+    (q, maximum)
+}
 
 fn extract_lossy_q(input: &[u16], options: LossyOptions) -> Result<(Vec<u8>, u8)> {
     let max_input = input
@@ -2134,9 +2229,9 @@ pub fn compress_lossy_u16_with_stats(
     let q_count_len = q_contexts * q_alphabet;
 
     let hist_start = Instant::now();
-    // Limit large private histograms to one per worker. Rayon's adaptive fold
-    // otherwise allocates and merges many tables when a volume has many slabs.
-    let histogram_batch_size = blocks.len().div_ceil(rayon::current_num_threads());
+    // Keep histogram memory bounded while allowing independent slabs to
+    // balance uneven foreground/background work across the worker pool.
+    let histogram_batch_size = histogram_grain(blocks.len(), q_count_len);
     let q_counts = blocks
         .par_chunks(histogram_batch_size)
         .map(|batch| {
@@ -2284,25 +2379,12 @@ pub fn compress_u16_with_stats(
     let mode = resolved.mode;
     let scale_bits = resolved.scale_bits;
 
-    let max_x = input
-        .par_iter()
-        .with_min_len(MIN_PREPROCESS_VOXELS)
-        .copied()
-        .max()
-        .unwrap_or(0);
-    let sqrt_lut = make_sqrt_lut();
-    let q_max = sqrt_lut[max_x as usize];
+    let q_start = Instant::now();
+    let (q, q_max) = extract_lossless_q(input);
+    let seconds_q_extract = q_start.elapsed().as_secs_f64();
     let q_alphabet = q_max as usize + 1;
     let r_max = 2u16 * q_max as u16;
     let r_alphabet = r_max as usize + 1;
-
-    let q_start = Instant::now();
-    let q: Vec<u8> = input
-        .par_iter()
-        .with_min_len(MIN_PREPROCESS_VOXELS)
-        .map(|&v| sqrt_lut[v as usize])
-        .collect();
-    let seconds_q_extract = q_start.elapsed().as_secs_f64();
 
     let blocks = block_specs(dims.z, block_depth);
     let q_contexts = q_context_count(q_alphabet, mode);
@@ -2310,7 +2392,7 @@ pub fn compress_u16_with_stats(
     let r_count_len = q_alphabet * r_alphabet;
 
     let hist_start = Instant::now();
-    let histogram_batch_size = blocks.len().div_ceil(rayon::current_num_threads());
+    let histogram_batch_size = histogram_grain(blocks.len(), q_count_len + r_count_len);
     let counts = blocks
         .par_chunks(histogram_batch_size)
         .map(|batch| {
@@ -4013,15 +4095,82 @@ mod tests {
     }
 
     #[test]
+    fn histogram_grain_bounds_work_and_private_table_memory() {
+        for threads in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                for blocks in [1usize, 2, 47, 1024] {
+                    for entries in [1usize, 37000, 1 << 21, usize::MAX] {
+                        let grain = histogram_grain(blocks, entries);
+                        assert!((1..=blocks).contains(&grain));
+                        let batches = blocks.div_ceil(grain);
+                        assert!(batches <= 4 * threads);
+                        let bytes = entries.saturating_mul(8) as u128;
+                        let budget = (64u128 * 1024 * 1024).max(threads as u128 * bytes);
+                        assert!(batches as u128 * bytes <= budget);
+                        if threads == 1 {
+                            assert_eq!(batches, 1);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn fused_lossless_extraction_preserves_symbols_maximum_and_chunk_tails() {
+        for threads in [1, 2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                for len in [1, 3, 65535, 65536, 65537, 131071, 131072, 131073] {
+                    for range in [6000, 65536] {
+                        let mut pixels: Vec<u16> =
+                            (0..len).map(|i| ((i * 31337) % range) as u16).collect();
+                        pixels[len - 1] = (range - 1) as u16;
+                        let expected: Vec<_> = pixels
+                            .iter()
+                            .map(|&v| (v as f64).sqrt().floor() as u8)
+                            .collect();
+                        let (actual, maximum) = extract_lossless_q_fused(&pixels);
+                        assert_eq!(actual, expected);
+                        assert_eq!(maximum, *expected.iter().max().unwrap());
+                    }
+                }
+                let mut final_peak = vec![0; 65537];
+                final_peak[65536] = u16::MAX;
+                let (actual, maximum) = extract_lossless_q_fused(&final_peak);
+                assert_eq!(maximum, 255);
+                assert!(actual[..65536].iter().all(|&q| q == 0));
+                assert_eq!(actual[65536], 255);
+                final_peak[65536] = 0;
+                let (zeros, maximum) = extract_lossless_q_fused(&final_peak);
+                assert!(zeros.iter().all(|&q| q == 0));
+                assert_eq!(maximum, 0);
+            });
+        }
+    }
+
+    #[test]
     fn histogram_batching_is_independent_of_worker_count() {
         let dims = Dims {
             x: 31,
             y: 19,
-            z: 21,
+            z: 65,
         };
-        let input = structured_volume(dims);
+        let mut input = structured_volume(dims);
+        for (i, pixel) in input.iter_mut().enumerate() {
+            if (i / (dims.x * dims.y * 4)) % 3 != 1 {
+                *pixel = 0;
+            }
+        }
         let mut reference = None;
-        for threads in [1, 2, 4] {
+        for threads in [1, 2, 4, 8] {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .build()
@@ -4653,9 +4802,22 @@ mod tests {
 
     #[test]
     fn default_kernels_match_general_kernels_at_edges_and_zero_transitions() {
-        for (x, y, z) in [(1, 1, 1), (3, 2, 5), (7, 5, 7), (16, 8, 4), (129, 17, 9)] {
+        for (x, y, z) in [
+            (1, 1, 1),
+            (3, 2, 5),
+            (7, 5, 7),
+            (15, 5, 3),
+            (16, 8, 4),
+            (17, 5, 5),
+            (31, 7, 3),
+            (32, 7, 3),
+            (33, 7, 5),
+            (64, 5, 5),
+            (65, 5, 5),
+            (129, 17, 9),
+        ] {
             let dims = Dims { x, y, z };
-            for pattern in 0..3 {
+            for pattern in 0..4 {
                 let input: Vec<u16> = (0..dims.voxels().unwrap())
                     .map(|i| {
                         let x = i % dims.x;
@@ -4665,6 +4827,8 @@ mod tests {
                             0 => 0,
                             1 if !(x / 7 + y / 5 + z / 3).is_multiple_of(4) => 0,
                             1 => ((i * 431 + 17) % 65000) as u16,
+                            3 if x % 33 != 16 || y % 4 != 2 => 0,
+                            3 => 1000,
                             _ => (i as u32).wrapping_mul(1664525).wrapping_add(1013904223) as u16,
                         }
                     })

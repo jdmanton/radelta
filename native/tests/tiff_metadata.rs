@@ -66,6 +66,12 @@ fn make<K: TiffKind>(mut enc: TiffEncoder<BufWriter<File>, K>, desc: &str) {
 }
 fn check(path: &Path, desc: &str, lossy: bool) {
     let mut dec = Decoder::new(BufReader::new(File::open(path).unwrap())).unwrap();
+    let contiguous = if desc.starts_with("ImageJ=") {
+        let start = dec.get_tag_u64(Tag::StripOffsets).unwrap() as usize;
+        Some((fs::read(path).unwrap(), start))
+    } else {
+        None
+    };
     for page in 0..4 {
         if page == 0 {
             assert_eq!(
@@ -107,6 +113,18 @@ fn check(path: &Path, desc: &str, lossy: bool) {
             u16::from(page) * 16
         };
         assert_eq!(pixels, vec![expected; 35]);
+        if let Some((bytes, start)) = &contiguous {
+            // Nested EXIF directories and per-page private values must not
+            // interrupt ImageJ's consecutive-plane reading, in either mode.
+            let at = start + usize::from(page) * 35 * 2;
+            let raw: Vec<_> = bytes[at..at + 70]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| u16::from_ne_bytes([b[0], b[1]]))
+                .collect();
+            assert_eq!(raw, pixels);
+        }
         if page != 3 {
             dec.next_image().unwrap();
         }
