@@ -14,6 +14,37 @@ from radelta._native import U8, library, pixel_pointer
 
 
 class ArrayTests(unittest.TestCase):
+    def test_metadata_attachment_keeps_native_buffer_alive_and_frees_original_size(self):
+        dll = library()
+        allocated, freed = [], []
+
+        class Binding:
+            def radelta_compress_u16_nd_alloc(self, *args):
+                status = dll.radelta_compress_u16_nd_alloc(*args)
+                allocated.append(ct.cast(args[-1], ct.POINTER(ct.c_size_t)).contents.value)
+                return status
+
+            def radelta_set_metadata(self, *args):
+                return dll.radelta_set_metadata(*args)
+
+            def radelta_buffer_free(self, pointer, size):
+                freed.append(size)
+                dll.radelta_buffer_free(pointer, size)
+
+        image = np.arange(35, dtype=np.uint16).reshape(5, 7)
+        with patch("radelta._array.library", return_value=Binding()):
+            encoded = radelta.compress(image, metadata=b"calibration" * 100)
+        np.testing.assert_array_equal(radelta.decompress(encoded), image)
+        self.assertEqual(freed, allocated)
+        self.assertNotEqual(freed[0], len(encoded))
+
+        with patch("radelta._array.library", return_value=Binding()), \
+                patch("radelta._array.pack_layout", side_effect=ValueError("injected failure")):
+            with self.assertRaisesRegex(ValueError, "injected failure"):
+                radelta.compress(image)
+        self.assertEqual(len(freed), 2)
+        self.assertEqual(freed, allocated)
+
     def test_layout_strides_endianness_and_contexts(self):
         for axes in ("yx", "zyx", "tyx", "tzyx", "tczyx", "xztcy"):
             shape = tuple(dict(t=2, c=2, z=3, y=5, x=7)[a] for a in axes)

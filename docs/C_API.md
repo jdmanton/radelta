@@ -133,7 +133,9 @@ No text encoding or application schema is imposed.
 - `radelta_set_metadata` produces an encoded image with metadata attached or
   replaced, without recompressing pixels. It accepts the existing encoded bytes
   and metadata bytes; use the normal NULL-output size query before allocating
-  the result. Zero metadata length removes it.
+  the result. Zero metadata length removes it. Size queries do not copy the
+  encoded image; an output call copies the pixel payload directly into the
+  caller's buffer once.
 - `radelta_get_metadata` extracts metadata from an encoded buffer. NULL output
   queries the required byte count; absent metadata returns OK with size zero.
 - `radelta_writer_set_metadata` copies metadata into a file writer before
@@ -149,6 +151,14 @@ Rust callers can use `set_metadata(&mut encoded, bytes)` and
 `read_file_metadata(path)`. File operations read/write only the metadata and
 container flags. `RadeltaFileHandle::open`, `metadata`, `info`, and `read_plane`
 provide an indexed Rust file reader as well.
+
+To save an already encoded buffer without growing or copying that buffer to
+attach metadata, Rust callers can use
+`write_encoded_with_metadata(&mut writer, &encoded, bytes)`. It writes the
+updated header, borrowed pixel payload and metadata as vectored I/O where the
+writer supports it, and returns the total bytes written. Flush and close the
+writer before publishing the destination. The supplied encoded buffer is
+unchanged; passing empty metadata removes any existing metadata in the output.
 
 ### Configuring the metadata limit
 

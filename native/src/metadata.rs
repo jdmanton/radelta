@@ -1,7 +1,7 @@
 //! Opaque, losslessly compressed metadata, independent of the pixel codec.
 use crate::{RadeltaError, Result};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, IoSlice, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -150,14 +150,92 @@ pub fn set_metadata(encoded: &mut Vec<u8>, metadata: &[u8]) -> Result<()> {
     encoded.extend_from_slice(&block);
     Ok(())
 }
-fn file_parts(file: &mut File) -> Result<(u64, Vec<u8>)> {
+
+/// Borrow the pixel payload instead of copying it when changing metadata.
+pub(crate) struct MetadataOutput<'a> {
+    core: &'a [u8],
+    header: [u8; 8],
+    block: Vec<u8>,
+    len: usize,
+}
+impl<'a> MetadataOutput<'a> {
+    pub(crate) fn new(encoded: &'a [u8], metadata: &[u8]) -> Result<Self> {
+        let core = split(encoded)?.0;
+        let block = if metadata.is_empty() {
+            Vec::new()
+        } else {
+            pack(metadata)?
+        };
+        let len = core
+            .len()
+            .checked_add(block.len())
+            .ok_or_else(|| error("metadata output size overflow"))?;
+        let mut header: [u8; 8] = core[..8].try_into().unwrap();
+        let flags = (u16::from_le_bytes([header[6], header[7]]) & !FLAG)
+            | if block.is_empty() { 0 } else { FLAG };
+        header[6..8].copy_from_slice(&flags.to_le_bytes());
+        Ok(Self {
+            core,
+            header,
+            block,
+            len,
+        })
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+    pub(crate) fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+        let mut buffers = [
+            IoSlice::new(&self.header),
+            IoSlice::new(&self.core[8..]),
+            IoSlice::new(&self.block),
+        ];
+        let mut remaining = buffers.as_mut_slice();
+        while !remaining.is_empty() {
+            match writer.write_vectored(remaining) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => IoSlice::advance_slices(&mut remaining, n),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Write an encoded image with metadata attached/replaced, without copying its
+/// pixel payload into another Vec. The input is unchanged; empty metadata
+/// removes an existing block. Returns bytes written. Flush the writer before
+/// publishing the output. This validates metadata framing, not the pixel codec.
+pub fn write_encoded_with_metadata(
+    writer: &mut impl Write,
+    encoded: &[u8],
+    metadata: &[u8],
+) -> Result<usize> {
+    let output = MetadataOutput::new(encoded, metadata)?;
+    output.write_to(writer).map_err(|e| error(&e.to_string()))?;
+    Ok(output.len())
+}
+
+struct FileLayout {
+    file_len: u64,
+    core_len: u64,
+    block_len: usize,
+    header: [u8; 8],
+}
+fn file_layout(file: &mut File) -> Result<FileLayout> {
     let io = |e: std::io::Error| error(&e.to_string());
     let len = file.metadata().map_err(io)?.len();
     file.seek(SeekFrom::Start(0)).map_err(io)?;
     let mut header = [0; 8];
     file.read_exact(&mut header).map_err(io)?;
     if !flagged(&header)? {
-        return Ok((len, Vec::new()));
+        return Ok(FileLayout {
+            file_len: len,
+            core_len: len,
+            block_len: 0,
+            header,
+        });
     }
     if len < 24 {
         return Err(error("truncated metadata footer"));
@@ -170,10 +248,23 @@ fn file_parts(file: &mut File) -> Result<(u64, Vec<u8>)> {
         .ok()
         .filter(|&n| n <= isize::MAX as usize)
         .ok_or_else(|| error("metadata exceeds platform allocation limits"))?;
-    let mut block = vec![0; block_len];
-    file.seek(SeekFrom::Start(start)).map_err(io)?;
+    Ok(FileLayout {
+        file_len: len,
+        core_len: start,
+        block_len,
+        header,
+    })
+}
+fn file_parts(file: &mut File) -> Result<(u64, Vec<u8>)> {
+    let layout = file_layout(file)?;
+    let io = |e: std::io::Error| error(&e.to_string());
+    if layout.block_len == 0 {
+        return Ok((layout.core_len, Vec::new()));
+    }
+    let mut block = vec![0; layout.block_len];
+    file.seek(SeekFrom::Start(layout.core_len)).map_err(io)?;
     file.read_exact(&mut block).map_err(io)?;
-    Ok((start, block))
+    Ok((layout.core_len, block))
 }
 pub(crate) fn file_metadata(file: &mut File) -> Result<(u64, Vec<u8>)> {
     let (len, block) = file_parts(file)?;
@@ -185,23 +276,44 @@ pub fn read_file_metadata(path: impl AsRef<Path>) -> Result<Vec<u8>> {
     file_metadata(&mut file).map(|(_, data)| data)
 }
 pub(crate) fn set_file_handle_metadata(file: &mut File, metadata: &[u8]) -> Result<()> {
-    let (len, _) = file_parts(file)?;
+    let layout = file_layout(file)?;
     let block = if metadata.is_empty() {
         Vec::new()
     } else {
         pack(metadata)?
     };
     let io = |e: std::io::Error| error(&e.to_string());
-    file.seek(SeekFrom::Start(6)).map_err(io)?;
-    let mut flags = [0; 2];
-    file.read_exact(&mut flags).map_err(io)?;
-    let flags = (u16::from_le_bytes(flags) & !FLAG) | if block.is_empty() { 0 } else { FLAG };
-    file.seek(SeekFrom::Start(len)).map_err(io)?;
+    let old_flags = u16::from_le_bytes([layout.header[6], layout.header[7]]);
+    let flags = (old_flags & !FLAG) | if block.is_empty() { 0 } else { FLAG };
+    let end = layout
+        .core_len
+        .checked_add(block.len() as u64)
+        .ok_or_else(|| error("metadata file size overflow"))?;
+    file.seek(SeekFrom::Start(layout.core_len)).map_err(io)?;
     file.write_all(&block).map_err(io)?;
-    file.set_len(len + block.len() as u64).map_err(io)?;
-    file.seek(SeekFrom::Start(6)).map_err(io)?;
-    file.write_all(&flags.to_le_bytes()).map_err(io)?;
+    if end < layout.file_len {
+        file.set_len(end).map_err(io)?;
+    }
+    if flags != old_flags {
+        file.seek(SeekFrom::Start(6)).map_err(io)?;
+        file.write_all(&flags.to_le_bytes()).map_err(io)?;
+    }
     file.flush().map_err(io)
+}
+
+/// Finish a newly written, unflagged Radelta stream positioned at its end.
+/// Internal writer helper: append metadata through the existing buffered
+/// handle, patch the known-zero flags, and flush before publication.
+#[doc(hidden)]
+pub fn finish_new_file_metadata(writer: &mut (impl Write + Seek), metadata: &[u8]) -> Result<()> {
+    let io = |e: std::io::Error| error(&e.to_string());
+    if !metadata.is_empty() {
+        let block = pack(metadata)?;
+        writer.write_all(&block).map_err(io)?;
+        writer.seek(SeekFrom::Start(6)).map_err(io)?;
+        writer.write_all(&FLAG.to_le_bytes()).map_err(io)?;
+    }
+    writer.flush().map_err(io)
 }
 /// Attach or replace metadata without loading/recompressing pixels.
 pub fn set_file_metadata(path: impl AsRef<Path>, metadata: &[u8]) -> Result<()> {

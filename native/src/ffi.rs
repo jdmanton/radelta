@@ -485,16 +485,22 @@ pub unsafe extern "C" fn radelta_set_metadata(
     } else {
         slice::from_raw_parts(metadata, metadata_size)
     };
-    let mut encoded = slice::from_raw_parts(input, input_size).to_vec();
-    if crate::set_metadata(&mut encoded, data).is_err() {
-        return RADELTA_CODEC_ERROR;
-    }
+    let encoded = match crate::metadata::MetadataOutput::new(
+        slice::from_raw_parts(input, input_size),
+        data,
+    ) {
+        Ok(encoded) => encoded,
+        Err(_) => return RADELTA_CODEC_ERROR,
+    };
     *output_size = encoded.len();
     if output.is_null() || capacity < encoded.len() {
         return RADELTA_BUFFER_TOO_SMALL;
     }
-    std::ptr::copy_nonoverlapping(encoded.as_ptr(), output, encoded.len());
-    RADELTA_OK
+    let mut destination = slice::from_raw_parts_mut(output, encoded.len());
+    match encoded.write_to(&mut destination) {
+        Ok(()) => RADELTA_OK,
+        Err(_) => RADELTA_CODEC_ERROR,
+    }
 }
 
 #[cfg(test)]

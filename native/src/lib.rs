@@ -25,7 +25,7 @@ pub mod metadata;
 pub mod output;
 pub use metadata::{
     metadata_limit, read_file_metadata, read_metadata, set_file_metadata, set_metadata,
-    set_metadata_limit, DEFAULT_METADATA_LIMIT_BYTES,
+    set_metadata_limit, write_encoded_with_metadata, DEFAULT_METADATA_LIMIT_BYTES,
 };
 mod ffi;
 mod file_api;

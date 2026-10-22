@@ -34,18 +34,20 @@ def compress(array, axes=None, *, lossy=False, offset_adu=None, gain_e_per_adu=N
                                               ct.byref(output), ct.byref(size))
     if status != 0:
         raise ValueError(f"Radelta encoding failed ({status})")
+    # Keep the native allocation alive through metadata attachment instead of
+    # copying the entire stream through Python bytes and a ctypes input array.
+    compressed_size = size.value
     try:
-        payload = bytes_buffer(ct.string_at(output, size.value))
+        meta = bytes_buffer(pack_layout(shape, axes, dtype, metadata))
+        status = dll.radelta_set_metadata(output, compressed_size, meta, len(meta), None, 0, ct.byref(size))
+        if status != 1:
+            raise ValueError("Cannot attach array metadata")
+        result = (ct.c_uint8 * size.value)()
+        if dll.radelta_set_metadata(output, compressed_size, meta, len(meta), result, size.value, ct.byref(size)) != 0:
+            raise ValueError("Cannot attach array metadata")
+        return bytes(result)
     finally:
-        dll.radelta_buffer_free(output, size.value)
-    meta = bytes_buffer(pack_layout(shape, axes, dtype, metadata))
-    status = dll.radelta_set_metadata(payload, len(payload), meta, len(meta), None, 0, ct.byref(size))
-    if status != 1:
-        raise ValueError("Cannot attach array metadata")
-    result = (ct.c_uint8 * size.value)()
-    if dll.radelta_set_metadata(payload, len(payload), meta, len(meta), result, size.value, ct.byref(size)) != 0:
-        raise ValueError("Cannot attach array metadata")
-    return bytes(result)
+        dll.radelta_buffer_free(output, compressed_size)
 
 
 def decompress(encoded, *, max_output_bytes=None):

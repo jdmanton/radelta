@@ -20,6 +20,9 @@ fn configurable_metadata_limits_cover_memory_files_and_tiff() {
     let unchanged = encoded.clone();
     assert!(set_metadata(&mut encoded, &[7; 33]).is_err());
     assert_eq!(encoded, unchanged);
+    let mut output = b"untouched".to_vec();
+    assert!(write_encoded_with_metadata(&mut output, &bare, &[7; 33]).is_err());
+    assert_eq!(output, b"untouched");
     set_metadata_limit(31);
     assert!(read_metadata(&encoded).is_err()); // Compressed size fits; inflated size does not.
     set_metadata_limit(32);

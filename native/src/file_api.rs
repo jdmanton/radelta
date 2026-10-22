@@ -789,11 +789,8 @@ impl RadeltaStreamWriter {
                 self.written_chunks, self.expected_chunks
             ));
         }
-        self.out.flush().map_err(|e| e.to_string())?;
-        if !self.metadata.is_empty() {
-            crate::metadata::set_file_handle_metadata(self.out.get_mut(), &self.metadata)
-                .map_err(|e| e.to_string())?;
-        }
+        crate::metadata::finish_new_file_metadata(&mut self.out, &self.metadata)
+            .map_err(|e| e.to_string())?;
         self.pending_output.publish().map_err(|e| e.to_string())?;
         self.finished = true;
         Ok(())

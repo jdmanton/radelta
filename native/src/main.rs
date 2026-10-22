@@ -1248,12 +1248,12 @@ fn encode_streaming_lossless(
             }
         }
     }
-    out.flush().map_err(|e| e.to_string())?;
     println!("Saving TIFF metadata...");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
     let metadata = tiff_metadata::capture(input, &info.layout)?;
+    radelta_native::metadata::finish_new_file_metadata(&mut out, &metadata)
+        .map_err(|e| e.to_string())?;
     drop(out);
-    radelta_native::set_file_metadata(pending.path(), &metadata).map_err(|e| e.to_string())?;
     let total = fs::metadata(pending.path())
         .map_err(|e| e.to_string())?
         .len() as usize;
@@ -1374,12 +1374,12 @@ fn encode_streaming_lossy(
             }
         }
     }
-    out.flush().map_err(|e| e.to_string())?;
     println!("Saving TIFF metadata...");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
     let metadata = tiff_metadata::capture(input, &info.layout)?;
+    radelta_native::metadata::finish_new_file_metadata(&mut out, &metadata)
+        .map_err(|e| e.to_string())?;
     drop(out);
-    radelta_native::set_file_metadata(pending.path(), &metadata).map_err(|e| e.to_string())?;
     let total = fs::metadata(pending.path())
         .map_err(|e| e.to_string())?
         .len() as usize;
@@ -1454,17 +1454,18 @@ fn ome_description(d: Dims5, order: &str) -> String {
 fn write_encoded_with_metadata(
     input: &Path,
     output: &Path,
-    encoded: &mut Vec<u8>,
+    encoded: &[u8],
     layout: &ResolvedLayout,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let metadata = tiff_metadata::capture(input, layout)?;
-    radelta_native::set_metadata(encoded, &metadata).map_err(|e| e.to_string())?;
     let (mut pending, mut file) =
         radelta_native::output::PendingOutput::create(output).map_err(|e| e.to_string())?;
-    file.write_all(encoded).map_err(|e| e.to_string())?;
+    let written = radelta_native::write_encoded_with_metadata(&mut file, encoded, &metadata)
+        .map_err(|e| e.to_string())?;
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
-    pending.publish().map_err(|e| e.to_string())
+    pending.publish().map_err(|e| e.to_string())?;
+    Ok(written)
 }
 
 fn load_dataset(path: &Path, ds: &DatasetArgs) -> Result<(Vec<u16>, ResolvedLayout), String> {
@@ -1784,33 +1785,34 @@ fn main() {
                                     Ok((data, layout)) => {
                                         let dims = layout.dims;
                                         match compress_u16_nd_with_stats(&data, dims, opts) {
-                                            Ok((mut encoded, stats)) => {
-                                                if let Err(e) = write_encoded_with_metadata(
-                                                    input,
-                                                    output,
-                                                    &mut encoded,
-                                                    &layout,
+                                            Ok((encoded, stats)) => {
+                                                match write_encoded_with_metadata(
+                                                    input, output, &encoded, &layout,
                                                 ) {
-                                                    Err(e.to_string())
-                                                } else {
-                                                    println!(
-                                                        "Wrote {} ({:.3} MiB)",
-                                                        output.display(),
-                                                        mib(encoded.len())
-                                                    );
-                                                    println!(
-                                                        "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
-                                                        dims.t, dims.c, dims.z, dims.y, dims.x
-                                                    );
-                                                    println!("Layout source: {}", layout.source);
-                                                    println!(
-                                                        "Lossless encode rate: {:.3} GB/s",
-                                                        gb_per_s(
-                                                            stats.raw_bytes,
-                                                            stats.seconds_total
-                                                        )
-                                                    );
-                                                    Ok(())
+                                                    Err(e) => Err(e),
+                                                    Ok(written) => {
+                                                        println!(
+                                                            "Wrote {} ({:.3} MiB)",
+                                                            output.display(),
+                                                            mib(written)
+                                                        );
+                                                        println!(
+                                                            "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
+                                                            dims.t, dims.c, dims.z, dims.y, dims.x
+                                                        );
+                                                        println!(
+                                                            "Layout source: {}",
+                                                            layout.source
+                                                        );
+                                                        println!(
+                                                            "Lossless encode rate: {:.3} GB/s",
+                                                            gb_per_s(
+                                                                stats.raw_bytes,
+                                                                stats.seconds_total
+                                                            )
+                                                        );
+                                                        Ok(())
+                                                    }
                                                 }
                                             }
                                             Err(e) => Err(e.to_string()),
@@ -1856,34 +1858,35 @@ fn main() {
                                     Ok((data, layout)) => {
                                         let dims = layout.dims;
                                         match compress_lossy_u16_nd_with_stats(&data, dims, opts) {
-                                            Ok((mut encoded, stats)) => {
-                                                if let Err(e) = write_encoded_with_metadata(
-                                                    input,
-                                                    output,
-                                                    &mut encoded,
-                                                    &layout,
+                                            Ok((encoded, stats)) => {
+                                                match write_encoded_with_metadata(
+                                                    input, output, &encoded, &layout,
                                                 ) {
-                                                    Err(e.to_string())
-                                                } else {
-                                                    println!(
-                                                        "Wrote {} ({:.3} MiB)",
-                                                        output.display(),
-                                                        mib(encoded.len())
-                                                    );
-                                                    println!(
-                                                        "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
-                                                        dims.t, dims.c, dims.z, dims.y, dims.x
-                                                    );
-                                                    println!("Layout source: {}", layout.source);
-                                                    println!(
-                                                        "Lossy encode rate: {:.3} GB/s",
-                                                        gb_per_s(
-                                                            stats.raw_bytes,
-                                                            stats.seconds_total
-                                                        )
-                                                    );
-                                                    println!("offset={:.6} ADU, gain={:.6} e-/ADU, noise-step={:.6}", opts.offset_adu, opts.gain_e_per_adu, opts.noise_step);
-                                                    Ok(())
+                                                    Err(e) => Err(e),
+                                                    Ok(written) => {
+                                                        println!(
+                                                            "Wrote {} ({:.3} MiB)",
+                                                            output.display(),
+                                                            mib(written)
+                                                        );
+                                                        println!(
+                                                            "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
+                                                            dims.t, dims.c, dims.z, dims.y, dims.x
+                                                        );
+                                                        println!(
+                                                            "Layout source: {}",
+                                                            layout.source
+                                                        );
+                                                        println!(
+                                                            "Lossy encode rate: {:.3} GB/s",
+                                                            gb_per_s(
+                                                                stats.raw_bytes,
+                                                                stats.seconds_total
+                                                            )
+                                                        );
+                                                        println!("offset={:.6} ADU, gain={:.6} e-/ADU, noise-step={:.6}", opts.offset_adu, opts.gain_e_per_adu, opts.noise_step);
+                                                        Ok(())
+                                                    }
                                                 }
                                             }
                                             Err(e) => Err(e.to_string()),
