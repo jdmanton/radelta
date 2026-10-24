@@ -1,6 +1,6 @@
 # Radelta compression for HDF5
 
-This plugin stores ordinary chunked HDF5 datasets using Radelta 0.8.5.
+This plugin stores ordinary chunked HDF5 datasets using Radelta 0.8.6.
 Each chunk contains an RDL1/RDM2 lossless or RDLQ/RDQ2 calibrated-lossy stream.
 HDF5 handles indexing, metadata and partial reads; the filter only encodes pixels.
 The Rust codec is linked into the plugin, so readers do not need a separate
@@ -35,7 +35,7 @@ The wheel supports Python 3.9+, Windows x86-64, macOS 11+ on Intel/Apple Silicon
 and Linux x86-64/ARM64 with glibc 2.34+. For example, on Windows:
 
 ```powershell
-python -m pip install .\radelta_hdf5-0.8.5-py3-none-win_amd64.whl
+python -m pip install .\radelta_hdf5-0.8.6-py3-none-win_amd64.whl
 ```
 
 The CLI and Python examples below work without `--plugin-path` or

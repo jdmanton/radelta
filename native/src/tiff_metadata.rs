@@ -413,7 +413,169 @@ fn prepare<W: Write + Seek, K: TiffKind>(
         }
         out.push(tag);
     }
+    prepare_imagej_metadata(&mut out)?;
     Ok(out)
+}
+
+// IJMetadata is a BYTE value containing its own endian-sensitive header,
+// UTF-16 strings and doubles. TIFF field conversion cannot handle its contents.
+// Convert only the export copy; the metadata archived in .rdlt stays unchanged.
+fn prepare_imagej_metadata(tags: &mut [SavedTag]) -> Result<(), String> {
+    let Some(index) = tags.iter().position(|t| t.id == 50839) else {
+        return Ok(());
+    };
+    let data = &tags[index].bytes;
+    let source = match data.get(..4) {
+        Some(b"IJIJ") => ByteOrder::BigEndian,
+        Some(b"JIJI") => ByteOrder::LittleEndian,
+        _ => return Ok(()), // Preserve unknown private payloads as opaque bytes.
+    };
+    if source == ByteOrder::native() {
+        return Ok(());
+    }
+    let counts = tags
+        .iter()
+        .find(|t| t.id == 50838)
+        .ok_or("ImageJ metadata is missing its byte-count table")?;
+    let width = match counts.ty {
+        3 => 2,
+        4 => 4,
+        16 => 8,
+        _ => return Err("invalid ImageJ metadata byte-count type".into()),
+    };
+    if !counts.bytes.len().is_multiple_of(width) {
+        return Err("invalid ImageJ metadata byte-count table".into());
+    }
+    let counts: Vec<usize> = counts
+        .bytes
+        .chunks_exact(width)
+        .map(|b| {
+            let mut value = [0u8; 8];
+            value[..width].copy_from_slice(b);
+            usize::try_from(u64::from_le_bytes(value))
+                .map_err(|_| "ImageJ metadata byte count exceeds usize")
+        })
+        .collect::<Result<_, _>>()?;
+    let converted = imagej_metadata_endian(data, &counts, source)?;
+    tags[index].bytes = converted;
+    Ok(())
+}
+
+fn imagej_metadata_endian(
+    data: &[u8],
+    counts: &[usize],
+    source: ByteOrder,
+) -> Result<Vec<u8>, String> {
+    let header = *counts.first().ok_or("empty ImageJ metadata byte counts")?;
+    if header < 4 || !(header - 4).is_multiple_of(8) || header > data.len() {
+        return Err("invalid ImageJ metadata header length".into());
+    }
+    let mut out = data.to_vec();
+    out[..4].reverse();
+    let mut position = header;
+    let mut entry = 1usize;
+    for offset in (4..header).step_by(8) {
+        let mut kind: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
+        if source == ByteOrder::LittleEndian {
+            kind.reverse();
+        }
+        let n: [u8; 4] = data[offset + 4..offset + 8].try_into().unwrap();
+        let n = match source {
+            ByteOrder::BigEndian => u32::from_be_bytes(n),
+            ByteOrder::LittleEndian => u32::from_le_bytes(n),
+        } as usize;
+        if n > counts.len().saturating_sub(entry) {
+            return Err("ImageJ metadata entries exceed byte counts".into());
+        }
+        out[offset..offset + 4].reverse();
+        out[offset + 4..offset + 8].reverse();
+        let unit = match &kind {
+            b"info" | b"labl" | b"prop" => 2, // UTF-16 code units
+            b"rang" => 8,                     // f64 values
+            _ => 1,                           // LUTs, ROIs, overlays and other opaque byte payloads
+        };
+        for &size in &counts[entry..entry + n] {
+            let end = position
+                .checked_add(size)
+                .filter(|&end| end <= data.len())
+                .ok_or("ImageJ metadata entry exceeds payload")?;
+            if !size.is_multiple_of(unit) {
+                return Err("invalid ImageJ metadata entry length".into());
+            }
+            for value in out[position..end].chunks_exact_mut(unit) {
+                value.reverse();
+            }
+            position = end;
+        }
+        entry += n;
+    }
+    if entry != counts.len() || position != data.len() {
+        return Err("ImageJ metadata byte counts do not cover its payload".into());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod imagej_endian_tests {
+    use super::*;
+
+    fn payload(order: ByteOrder) -> Vec<u8> {
+        let big = order == ByteOrder::BigEndian;
+        let mut out = if big { b"IJIJ" } else { b"JIJI" }.to_vec();
+        for mut kind in [*b"info", *b"rang", *b"roi "] {
+            if !big {
+                kind.reverse();
+            }
+            out.extend_from_slice(&kind);
+            out.extend_from_slice(&if big {
+                1u32.to_be_bytes()
+            } else {
+                1u32.to_le_bytes()
+            });
+        }
+        // U+00D8 exposes incorrect UTF-16 byte order as a surrogate error.
+        out.extend_from_slice(&if big {
+            216u16.to_be_bytes()
+        } else {
+            216u16.to_le_bytes()
+        });
+        out.extend_from_slice(&if big {
+            1.25f64.to_be_bytes()
+        } else {
+            1.25f64.to_le_bytes()
+        });
+        out.extend_from_slice(&[12, 34, 56]); // Opaque ROI bytes must not swap.
+        out
+    }
+
+    #[test]
+    fn imagej_strings_doubles_and_headers_swap_but_opaque_bytes_do_not() {
+        let counts = [28, 2, 8, 3];
+        let big = payload(ByteOrder::BigEndian);
+        let little = payload(ByteOrder::LittleEndian);
+        assert_eq!(
+            imagej_metadata_endian(&big, &counts, ByteOrder::BigEndian).unwrap(),
+            little
+        );
+        assert_eq!(
+            imagej_metadata_endian(&little, &counts, ByteOrder::LittleEndian).unwrap(),
+            big
+        );
+    }
+
+    #[test]
+    fn invalid_imagej_sizes_and_counts_are_rejected() {
+        let data = payload(ByteOrder::BigEndian);
+        for counts in [
+            vec![],
+            vec![29, 2, 8, 3],
+            vec![28, 2],
+            vec![28, usize::MAX, 8, 3],
+            vec![28, 3, 7, 3],
+        ] {
+            assert!(imagej_metadata_endian(&data, &counts, ByteOrder::BigEndian).is_err());
+        }
+    }
 }
 fn page_mapping(
     d: Dims5,
