@@ -188,8 +188,8 @@ enum {
 
 int32_t radelta_file_open(const char *path_utf8, radelta_file_handle **out_handle);
 void radelta_file_close(radelta_file_handle *handle);
-/* Decoded retention budget; default 256 MiB. Zero restores single-entry
-   caching. A single oversized volume/chunk is always permitted. */
+/* Decoded retention budget; default 2 GiB per open handle, grown on demand.
+   Zero restores single-entry caching. One oversized volume/chunk is permitted. */
 int32_t radelta_file_set_cache_limit(const radelta_file_handle *handle, uint64_t max_bytes);
 int32_t radelta_file_get_info(const radelta_file_handle *handle, radelta_file_info *out_info);
 int32_t radelta_file_read_plane_u16(

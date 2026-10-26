@@ -21,7 +21,8 @@ The main project documentation is:
 coordinates and return consecutive planes in request order, including repeats.
 Independent volumes/chunks decode in the shared Rayon pool. Single large volumes
 already parallelize their codec blocks, so batches help most with many small units.
-The existing adaptive 256 MiB decoded cache is unchanged. Each batch admits up to
+The adaptive decoded cache has a 2 GiB retention budget per open handle and grows
+on demand. Each batch admits up to
 256 MiB of additional decoded pixels plus compressed payloads, or one larger unit;
 codec scratch and the caller's output are separate.
 

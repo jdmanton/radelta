@@ -292,8 +292,10 @@ small seek-triggered flushes; larger prefixes retain the file-backed path.
 If even one unit's working estimate exceeds the allowance, or interleaved
 output requires more simultaneously retained units than it permits, export
 uses direct plane reads with an adaptive cache
-limited to one quarter of the allowance, capped at 256 MiB. This can re-decode
-evicted channel data; increasing the allowance enables the faster unit path.
+limited to one quarter of the allowance, capped at 2 GiB. The default 2048 MiB
+allowance permits a 512 MiB cache on this fallback path; `--memory-mib 8192`
+permits the full 2 GiB cache. Evicted channel data may be decoded again;
+increasing the allowance can enable the faster unit path.
 
 These are working-buffer allowances, not hard process-RSS limits. Codec models,
 scratch, TIFF directories and metadata also use memory, and at least one whole

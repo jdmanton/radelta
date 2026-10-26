@@ -3,7 +3,7 @@
 
 Requires numpy; optional CLI export checks also require tifffile. Fixtures are
 two 32x256x256 uint16 channels (8 MiB total), so their active decoded data fits
-the new 256 MiB default cache. Timings include initial decoding and plane copies,
+the native default cache (currently 2 GiB per handle). Timings include initial decoding and plane copies,
 but exclude opening, buffer allocation and validation. No fsync is measured.
 """
 import argparse

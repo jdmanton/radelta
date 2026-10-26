@@ -9,7 +9,7 @@ Download the wheel matching your operating system and architecture from the
 GitHub release or a completed CI run, then install that file. For Windows x86-64:
 
 ```powershell
-python -m pip install .\radelta-0.8.6-py3-none-win_amd64.whl
+python -m pip install .\radelta-0.8.7-py3-none-win_amd64.whl
 ```
 
 The wheel includes its native codec. No Rust compiler, DLL copying or
@@ -21,7 +21,7 @@ refer to downloaded wheel files.
 For HDF5 files, also install the matching `radelta_hdf5` wheel:
 
 ```powershell
-python -m pip install .\radelta_hdf5-0.8.6-py3-none-win_amd64.whl
+python -m pip install .\radelta_hdf5-0.8.7-py3-none-win_amd64.whl
 ```
 
 It installs h5py and bundles a filter that registers with h5py's own HDF5
@@ -88,8 +88,8 @@ supports integers, slices, negative indices/steps and one ellipsis; it does not
 support NumPy fancy/boolean indexing or insertion of new axes. It decodes full
 XY planes from the native cache, or intersecting HDF5 chunks, and allocates the
 requested output region. For `.rdlt` files, recently decoded volumes or Z chunks
-are retained in a 256 MiB LRU cache by default, so alternating channels can reuse
-their decoded data. Multiple entries are retained only after interleaving or
+are retained in a 2 GiB LRU cache per open file by default, grown on demand,
+so alternating channels can reuse their decoded data. Multiple entries are retained only after interleaving or
 revisiting data is detected; a first sequential pass keeps one entry.
 `open` and `read` accept `cache_mib` to override this budget;
 zero restores single-entry caching. Up to 128 entries are retained. One decoded

@@ -85,7 +85,7 @@ struct ChunkSegment {
 
 /// Budget for retaining decoded volumes/chunks across interleaved plane reads.
 /// A single oversized entry is still retained, as in the original reader.
-pub const DEFAULT_FILE_CACHE_BYTES: usize = 256 * 1024 * 1024;
+pub const DEFAULT_FILE_CACHE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 128;
 // Additional decoded pixels plus compressed payloads admitted by one batch.
 // Codec scratch and the existing retention cache are separate; one oversized

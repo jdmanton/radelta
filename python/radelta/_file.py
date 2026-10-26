@@ -190,7 +190,7 @@ class Dataset:
 
 
 def open(path, *, dataset="/images", cache_mib=None):
-    """Open a file for lazy reads. Radelta retains up to 256 MiB of decoded
+    """Open a file for lazy reads. Radelta retains up to 2 GiB of decoded
     volumes/chunks by default; cache_mib overrides that budget, and zero selects
     the original single-entry cache. One oversized entry is always allowed.
     This is a retention budget, not a limit on decoder working memory.

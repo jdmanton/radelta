@@ -9,7 +9,8 @@ with `--page-order TZC` encounter the same problem.
 The reader now uses an adaptive LRU cache. A first sequential pass retains one
 entry, preserving its previous decoded-data footprint. Same-Z channel switches
 or revisits to recently read entries enable multiple entries. The default
-retention budget is 256 MiB **per open handle**, with at most 128 entries.
+retention budget is 2 GiB **per open handle**, grown on demand, with at most
+128 entries.
 Entries are evicted before decoding another volume/chunk, and retained bytes
 are counted using allocation capacity. One oversized entry is allowed, as in
 the original reader; this budget does not cap total decoder working memory.
@@ -25,6 +26,8 @@ bindings; Fiji benefits from the new native library without Java changes.
 ## Measurements
 
 Measured on Linux x86-64, Intel Xeon Platinum 8573C, Rust 1.98.0 release builds.
+These historical measurements used a 256 MiB retention budget; the current
+default is 2 GiB. They do not measure the effect of the larger default.
 The baseline includes the preceding TIFF I/O, output I/O and indexed-read
 patches. These are additional gains over that baseline.
 

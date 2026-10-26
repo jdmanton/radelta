@@ -129,7 +129,8 @@ The native file reader retains recently decoded volumes/chunks in an LRU cache,
 so channel-interleaved reads do not repeatedly decode the same data. It keeps a
 single entry during a first sequential pass and enables multiple entries when
 it detects interleaving or revisiting previously read data. Its default
-decoded-data budget is 256 MiB, with at most 128 entries. Call
+decoded-data budget is 2 GiB per open handle, grown on demand, with at most
+128 entries. Call
 `radelta_file_set_cache_limit(handle, max_bytes)` to change this budget. Zero
 restores the original single-entry cache. One oversized entry is always allowed;
 this is a retention budget, not a cap on the decoder's total working memory.

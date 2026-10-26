@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "radelta"
-version = "0.8.6"
+version = "0.8.7"
 description = "Lossless and camera-calibrated uint16 array compression"
 requires-python = ">=3.9"
 license = {text = "BSD-3-Clause"}
 dependencies = ["numpy>=1.21"]
 
 [project.optional-dependencies]
-hdf5 = ["radelta-hdf5==0.8.6"]
-zarr = ["radelta-zarr==0.8.6; python_version >= '3.11'"]
+hdf5 = ["radelta-hdf5==0.8.7"]
+zarr = ["radelta-zarr==0.8.7; python_version >= '3.11'"]
 
 [tool.setuptools.package-data]
 radelta = ["natives/*.dll", "natives/*.so", "natives/*.dylib"]

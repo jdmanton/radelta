@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "radelta"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "crc32fast",
  "lz4_flex",
