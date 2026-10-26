@@ -9,7 +9,7 @@ Download the wheel matching your operating system and architecture from the
 GitHub release or a completed CI run, then install that file. For Windows x86-64:
 
 ```powershell
-python -m pip install .\radelta-0.8.7-py3-none-win_amd64.whl
+python -m pip install .\radelta-0.8.8-py3-none-win_amd64.whl
 ```
 
 The wheel includes its native codec. No Rust compiler, DLL copying or
@@ -21,7 +21,7 @@ refer to downloaded wheel files.
 For HDF5 files, also install the matching `radelta_hdf5` wheel:
 
 ```powershell
-python -m pip install .\radelta_hdf5-0.8.7-py3-none-win_amd64.whl
+python -m pip install .\radelta_hdf5-0.8.8-py3-none-win_amd64.whl
 ```
 
 It installs h5py and bundles a filter that registers with h5py's own HDF5

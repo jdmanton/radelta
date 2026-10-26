@@ -174,7 +174,7 @@ final class RadeltaHdf5Writer {
         return new float[] {(float) z, (float) y, (float) x};
     }
 
-    /** The codec version in the embedded filter's name, e.g. "0.8.7". */
+    /** The codec version in the embedded filter's name, e.g. "0.8.8". */
     static String filterVersion(String name) {
         String prefix = "Radelta ";
         if (name == null || !name.startsWith(prefix)) return "unknown";

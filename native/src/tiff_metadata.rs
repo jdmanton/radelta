@@ -2,10 +2,13 @@
 //! descriptive values retain their TIFF type and are stored little-endian.
 use super::*;
 use std::borrow::Cow;
+use std::io::Read;
 use tiff::decoder::IfdDecoder;
 use tiff::encoder::{DirectoryEncoder, TiffValue};
 use tiff::tags::{ByteOrder, IfdPointer, Type, ValueBuffer};
 const SIGNATURE: &[u8; 8] = b"RDTIFF01";
+const PYRAMID_SIGNATURE: &[u8; 8] = b"RDTIFF02";
+mod pyramids;
 pub const ARCHIVE_TAG: u16 = 65000;
 #[derive(Clone, Debug)]
 struct SavedTag {
@@ -19,6 +22,7 @@ pub struct TiffMetadata {
     pub mapping: Vec<usize>,
     tags: Vec<Vec<SavedTag>>,
     pub layout_valid: bool,
+    pyramids: Vec<Vec<pyramids::Image>>,
 }
 fn structural(id: u16) -> bool {
     matches!(id, 254..=259 | 263..=266 | 273 | 277..=281 | 284 | 288..=293 | 317 | 321..=325 | 330 | 338..=339 | 347 | 512..=521 | 529..=532)
@@ -78,8 +82,8 @@ fn read_tags(
     }
     Ok(tags)
 }
-fn resolve_children(
-    dec: &mut Decoder<BufReader<File>>,
+fn resolve_children<R: Read + Seek>(
+    dec: &mut Decoder<R>,
     tags: &mut [SavedTag],
     depth: usize,
     budget: &mut usize,
@@ -175,10 +179,21 @@ pub fn capture(path: &Path, layout: &ResolvedLayout) -> Result<Vec<u8>, String> 
         put(&mut out, (t * d.c + c) * d.z + z);
     }
     let mut all = Vec::new();
+    let mut pyramid_images = Vec::new();
     let mut multisample = false;
     let mut budget = limit - out.len() - 8;
     loop {
         let samples = page_samples(&mut dec)?;
+        let levels = pyramids::capture(path, &mut dec, &mut budget)?;
+        if !levels.is_empty()
+            && (samples > 1
+                || desc
+                    .as_deref()
+                    .is_some_and(|d| d.trim_start().starts_with("ImageJ=")))
+        {
+            return Err("SubIFDs on planar multisample or ImageJ contiguous stacks are not supported; refusing to discard pyramid pixels".into());
+        }
+        pyramid_images.push(levels);
         let mut tags = read_tags(&mut dec.image_ifd(), true, &mut budget)?;
         resolve_children(&mut dec, &mut tags, 0, &mut budget)?;
         if samples > 1 {
@@ -208,6 +223,24 @@ pub fn capture(path: &Path, layout: &ResolvedLayout) -> Result<Vec<u8>, String> 
     put(&mut out, all.len());
     for tags in &all {
         save_tags(&mut out, tags);
+    }
+    if pyramid_images.iter().any(|images| !images.is_empty()) {
+        let extra = pyramid_images
+            .len()
+            .checked_mul(8)
+            .and_then(|n| n.checked_add(8))
+            .ok_or("pyramid count overflow")?;
+        if extra > budget {
+            return Err("TIFF pyramid metadata exceeds --metadata-limit-mib".into());
+        }
+        out[..8].copy_from_slice(PYRAMID_SIGNATURE);
+        put(&mut out, pyramid_images.len());
+        for images in &pyramid_images {
+            put(&mut out, images.len());
+            for image in images {
+                image.save(&mut out);
+            }
+        }
     }
     if out.len() > limit {
         return Err("TIFF metadata exceeds configured byte limit".into());
@@ -264,7 +297,8 @@ impl<'a> Reader<'a> {
 }
 impl TiffMetadata {
     pub fn parse(bytes: &[u8], d: Dims5) -> Result<Option<Self>, String> {
-        if !bytes.starts_with(SIGNATURE) {
+        let has_pyramids = bytes.starts_with(PYRAMID_SIGNATURE);
+        if !bytes.starts_with(SIGNATURE) && !has_pyramids {
             return Ok(None);
         }
         let mut rd = Reader { bytes: &bytes[8..] };
@@ -291,6 +325,23 @@ impl TiffMetadata {
         for _ in 0..count {
             tags.push(rd.tags(0)?);
         }
+        let mut pyramids = Vec::new();
+        if has_pyramids {
+            if rd.n()? != count {
+                return Err("pyramid parent count mismatch".into());
+            }
+            for _ in 0..count {
+                let n = rd.n()?;
+                if n > rd.bytes.len() / 40 {
+                    return Err("invalid pyramid image count".into());
+                }
+                pyramids.push(
+                    (0..n)
+                        .map(|_| pyramids::Image::load(&mut rd, 0))
+                        .collect::<Result<_, _>>()?,
+                );
+            }
+        }
         if !rd.bytes.is_empty() {
             return Err("trailing TIFF metadata bytes".into());
         }
@@ -298,6 +349,7 @@ impl TiffMetadata {
             mapping,
             tags,
             layout_valid,
+            pyramids,
         }))
     }
     fn page_tags(&self, page: usize) -> &[SavedTag] {
@@ -313,6 +365,15 @@ impl TiffMetadata {
                     .lines()
                     .any(|line| line.trim_start().starts_with("ImageJ="))
         })
+    }
+    fn pyramid_bytes(&self) -> Result<u64, String> {
+        let mut size = 0u64;
+        for image in self.pyramids.iter().flatten() {
+            size = size
+                .checked_add(image.raw_bytes()?)
+                .ok_or("pyramid size overflow")?;
+        }
+        Ok(size)
     }
 }
 fn write_tag<W: Write + Seek, K: TiffKind>(
@@ -629,9 +690,15 @@ pub fn write(
     {
         return write_imagej_layout(path, d, &mapping, m, plane_reader);
     }
+    let pyramid_bytes = saved
+        .as_ref()
+        .map(|m| m.pyramid_bytes())
+        .transpose()?
+        .unwrap_or(0);
     let size = (d.voxels().map_err(|e| e.to_string())? as u64)
         .checked_mul(2)
         .and_then(|v| v.checked_add(metadata.len() as u64))
+        .and_then(|v| v.checked_add(pyramid_bytes))
         .ok_or("TIFF size overflow")?;
     let mut writer =
         BufWriter::with_capacity(1024 * 1024, File::create(path).map_err(|e| e.to_string())?);
@@ -871,11 +938,16 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
             return Err("TIFF plane source returned the wrong sample count".into());
         }
         let source_page = inverse.as_ref().map(|v| v[canonical]);
-        let tags = if let (Some(m), Some(p)) = (saved, source_page) {
+        let mut tags = if let (Some(m), Some(p)) = (saved, source_page) {
             prepare(enc, m.page_tags(p))?
         } else {
             Vec::new()
         };
+        if let (Some(m), Some(p)) = (saved, source_page) {
+            if let Some(images) = m.pyramids.get(p) {
+                pyramids::append_pointer(enc, images, &mut tags)?;
+            }
+        }
         let mut image = enc
             .new_image::<colortype::Gray16>(d.x as u32, d.y as u32)
             .map_err(|e| e.to_string())?;
@@ -885,7 +957,7 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
             .rows_per_strip(d.y as u32)
             .map_err(|e| e.to_string())?;
         for tag in &tags {
-            if !structural(tag.id) && (tag.id != 270 || preserve) {
+            if (!structural(tag.id) || tag.id == 330) && (tag.id != 270 || preserve) {
                 write_tag(image.encoder(), tag)?;
             }
         }

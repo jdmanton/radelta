@@ -233,8 +233,27 @@ supplied by a non-TIFF application is also saved in tag 65000. Other per-plane
 tags follow their corresponding pixels. Without source metadata, output uses
 canonical TCZ order and a generated OME description.
 
-TIFF conversion covers the main grayscale image stack; it does not copy
-thumbnail/pyramid image payloads. Unknown private values are preserved, but
+TIFF conversion preserves the main grayscale image stack and its uint16,
+single-sample grayscale SubIFD pyramid levels, including nested levels. Each
+stored reduced-resolution image is compressed losslessly and restored beneath
+its original parent plane; explicit page reordering moves its pyramid with it.
+The source level pixels are retained even when the main image is encoded lossy.
+Strips, tiles, and input compression may change on output; pixel values,
+SubIFD relationships, descriptive tags and calibration are preserved.
+
+Pyramid images use the TIFF metadata payload and count towards
+`--metadata-limit-mib` (default 1024 MiB); this holds their compressed Radelta
+streams, not their raw pixels. Increase the limit on both encode and decode for
+larger pyramids. Metadata is loaded in memory, and auxiliary decoding requires
+one complete level plane plus codec workspace. This is separate from the main
+streaming image-buffer allowance. Unsupported SubIFD sample types, linked image
+chains within SubIFDs, and SubIFDs on ImageJ or planar-multisample primary pages
+are rejected instead of being discarded. Additional top-level image series or
+thumbnails with different XY dimensions remain unsupported.
+
+Files containing pyramids require this updated TIFF adapter to restore them.
+Older files which discarded pyramid pixels must be re-encoded from the originals.
+Unknown private values are preserved, but
 vendor-specific pointers hidden inside opaque binary values cannot be relocated.
 See [metadata encoding](FORMAT.md#opaque-metadata-all-containers) for details.
 
