@@ -205,9 +205,12 @@ jobs:
           python scripts/stage_imagej_natives.py
           --native-packages native-packages
           --hdf5-packages hdf5-packages
+          --linux-test-tools _deps/imagej-test-tools
 
       - name: Build universal plugin JAR
         working-directory: imagej-plugin
+        env:
+          RADELTA_NATIVE_LIBRARY: ${{ github.workspace }}/_deps/imagej-test-tools/libradelta.so
         run: mvn --batch-mode package
 
       - name: Package complete Fiji installation

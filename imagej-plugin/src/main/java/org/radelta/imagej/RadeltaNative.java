@@ -8,6 +8,7 @@ import com.sun.jna.Native;
 import com.sun.jna.Pointer;
 import com.sun.jna.Structure;
 import com.sun.jna.ptr.PointerByReference;
+import com.sun.jna.ptr.IntByReference;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -26,6 +27,9 @@ final class RadeltaNative {
     static final int FLAG_STREAMING = 4;
 
     interface Api extends Library {
+        int radelta_decompress_u16(Pointer input, SizeT inputSize, short[] output,
+                                  SizeT capacity, SizeTReference count,
+                                  IntByReference x, IntByReference y, IntByReference z);
         SizeT radelta_get_metadata_limit();
         int radelta_file_get_metadata(Pointer handle, byte[] output, SizeT capacity, SizeTReference size);
         int radelta_writer_set_metadata(Pointer handle, byte[] data, SizeT size);

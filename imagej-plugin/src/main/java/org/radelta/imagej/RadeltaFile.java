@@ -14,7 +14,11 @@ final class RadeltaFile implements Closeable {
     private Pointer handle;
     private Memory batchBuffer;
     final Path sourcePath;
-    final int width, height, slices, channels, frames;
+    int width, height;
+    final int fullWidth, fullHeight, slices, channels, frames;
+    private byte[] metadata, tiffMetadata;
+    private RadeltaPyramids pyramids;
+    private int resolution;
     final int format, flags;
     final boolean lossy, streaming;
 
@@ -23,6 +27,8 @@ final class RadeltaFile implements Closeable {
         this.sourcePath = Paths.get(path).toRealPath();
         this.width = positive(info.nx, "X");
         this.height = positive(info.ny, "Y");
+        this.fullWidth = width;
+        this.fullHeight = height;
         this.slices = positive(info.nz, "Z");
         this.channels = positive(info.nc, "C");
         this.frames = positive(info.nt, "T");
@@ -62,6 +68,7 @@ final class RadeltaFile implements Closeable {
 
     synchronized byte[] readMetadata() throws IOException {
         if (handle == null) throw new IOException("Radelta file is closed");
+        if (metadata != null) return metadata;
         RadeltaNative.SizeTReference size = new RadeltaNative.SizeTReference();
         int rc = RadeltaNative.api().radelta_file_get_metadata(handle, null, new RadeltaNative.SizeT(), size);
         if (rc != RadeltaNative.OK && rc != 1) throw new IOException("Could not read Radelta metadata");
@@ -71,11 +78,36 @@ final class RadeltaFile implements Closeable {
         byte[] data = new byte[(int)length];
         rc = RadeltaNative.api().radelta_file_get_metadata(handle, data, new RadeltaNative.SizeT(length), size);
         if (rc != RadeltaNative.OK || size.value() != length) throw new IOException("Could not read Radelta metadata");
+        metadata = data;
         return data;
     }
 
+    synchronized RadeltaPyramids pyramids() throws IOException {
+        if (pyramids == null) {
+            tiffMetadata = RadeltaMetadata.sourceTiff(readMetadata());
+            pyramids = RadeltaPyramids.parse(tiffMetadata, planeCount());
+        }
+        return pyramids;
+    }
+
+    synchronized void selectResolution(int index) throws IOException {
+        if (handle == null) throw new IOException("Radelta file is closed");
+        if (index < 0 || index > pyramids().levels.size())
+            throw new IOException("No stored Radelta resolution " + index);
+        resolution = index;
+        width = index == 0 ? fullWidth : pyramids.levels.get(index - 1).width;
+        height = index == 0 ? fullHeight : pyramids.levels.get(index - 1).height;
+    }
+
+    int resolution() { return resolution; }
+
     synchronized short[] readPlane(int t, int c, int z) throws IOException {
         if (handle == null) throw new IOException("Radelta file is closed");
+        if (t < 0 || t >= frames || c < 0 || c >= channels || z < 0 || z >= slices)
+            throw new IOException("Radelta plane coordinates out of range");
+        if (resolution != 0)
+            return RadeltaPyramids.decode(tiffMetadata,
+                    pyramids.levels.get(resolution - 1).planes[(t * channels + c) * slices + z]);
         short[] pixels = new short[Math.multiplyExact(width, height)];
         int rc = RadeltaNative.api().radelta_file_read_plane_u16(
                 handle, t, c, z, pixels, pixels.length);
@@ -93,8 +125,9 @@ final class RadeltaFile implements Closeable {
         final int plane = Math.multiplyExact(width, height);
         final short[][] result = new short[count][];
         if (count == 0) return result;
-        if (count == 1) {
-            result[0] = readPlane(tcz[0], tcz[1], tcz[2]);
+        if (count == 1 || resolution != 0) {
+            for (int i = 0; i < count; i++)
+                result[i] = readPlane(tcz[3 * i], tcz[3 * i + 1], tcz[3 * i + 2]);
             return result;
         }
         final long voxels = Math.multiplyExact((long) plane, count);

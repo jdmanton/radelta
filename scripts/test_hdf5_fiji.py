@@ -70,6 +70,15 @@ def main():
                            "macos": "libradelta_native.dylib"}[args.platform]
             build_env = dict(os.environ)
             build_env["RADELTA_NATIVE_LIBRARY"] = str(ROOT / "hdf5/build/cargo/release" / native_name)
+            # CMake builds the codec with --lib only. The ImageJ pyramid
+            # integration tests also invoke the CLI beside that library.
+            cargo = shutil.which("cargo")
+            if not cargo:
+                raise RuntimeError("Cargo is required to build the ImageJ pyramid test CLI")
+            subprocess.run([cargo, "build", "--release", "--locked", "--bin", "radelta",
+                            "--manifest-path", str(ROOT / "native/Cargo.toml"),
+                            "--target-dir", str(ROOT / "hdf5/build/cargo")],
+                           env=build_env, check=True)
             mvn = shutil.which("mvn")
             if not mvn:
                 raise RuntimeError("Maven is required to build the ImageJ integration test")

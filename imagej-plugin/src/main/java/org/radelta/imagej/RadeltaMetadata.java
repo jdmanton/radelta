@@ -126,7 +126,7 @@ final class RadeltaMetadata {
             if (in.available() != 0) throw new IOException("Trailing ImageJ metadata bytes");
         }
         imp.setProperty(ORIGINAL, original);
-        if (values == null && starts(original, TIFF)) applyTiff(imp, original);
+        if (values == null && (starts(original, TIFF) || RadeltaPyramids.isPyramid(original))) applyTiff(imp, original);
         if (values != null) applySnapshot(imp, values);
     }
 
@@ -249,6 +249,12 @@ final class RadeltaMetadata {
         return bytes;
     }
 
+    static byte[] sourceTiff(byte[] data) throws IOException {
+        if (starts(data, MAGIC))
+            return readBytes(new DataInputStream(new ByteArrayInputStream(data, 8, data.length - 8)));
+        return data;
+    }
+
     private static boolean starts(byte[] data, byte[] signature) {
         if (data.length < signature.length) return false;
         for (int i = 0; i < signature.length; i++) if (data[i] != signature[i]) return false;
@@ -271,6 +277,7 @@ final class RadeltaMetadata {
                 throw new IOException("TIFF metadata IFD count mismatch");
             Map<Integer, byte[]> tags = new HashMap<Integer, byte[]>();
             for (long i = 0; i < ifds; i++) readTags(in, i == 0 ? tags : null, 0);
+            if (RadeltaPyramids.isPyramid(data)) RadeltaPyramids.skip(in, (int) pages);
             if (in.hasRemaining()) throw new IOException("Trailing TIFF metadata bytes");
             Calibration c = imp.getCalibration();
             int unit =
@@ -308,7 +315,7 @@ final class RadeltaMetadata {
         }
     }
 
-    private static void readTags(ByteBuffer in, Map<Integer, byte[]> tags, int depth)
+    static void readTags(ByteBuffer in, Map<Integer, byte[]> tags, int depth)
             throws IOException {
         if (depth > 16) throw new IOException("TIFF metadata nesting exceeds 16");
         long count = in.getLong();

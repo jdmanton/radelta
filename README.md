@@ -237,12 +237,25 @@ between a virtual stack (the default) and loading the entire dataset into RAM.
 The dialog shows the dataset dimensions, format, minimum 16-bit pixel storage,
 Java heap limit, and approximate unused heap. Full loading reports progress and
 closes the source file once complete; virtual loading decodes planes on demand.
+For CLI-encoded TIFF pyramids, the same dialog offers a **Resolution** choice.
+Level 0 is the full-resolution image; additional entries use the original stored
+SubIFD pixels, including nested levels. Each selection retains C/Z/T dimensions
+and scales XY pixel calibration to the selected image size. Only levels present
+at the same SubIFD path and dimensions for every primary plane are offered as
+hyperstacks; irregular pyramids remain preserved for CLI TIFF restoration.
 Both modes restore the stored metadata. The memory estimate excludes Java/ImageJ
-and native decoding overhead.
+and native decoding overhead. Stored pyramid payloads remain compressed in
+memory while a virtual stack is open and are additional to the pixel estimate.
 
 Headless opening defaults to a virtual stack. Scripts can explicitly select a
 mode with `RadeltaImageFactory.openForDisplay(path, loadIntoMemory)`;
-`openBase(path)` remains a non-interactive virtual-stack reader.
+`openBase(path)` remains a non-interactive full-resolution virtual-stack reader.
+Use `RadeltaImageFactory.openForDisplay(path, loadIntoMemory, resolution)` to
+select a stored resolution from a script (0 is full resolution). Image properties
+`Radelta.ResolutionCount` and `Radelta.StoredPyramidImages` report selectable
+resolutions and the total preserved reduced-image count. Ordinary files have one
+resolution. A reduced view resaved from ImageJ becomes a standalone image with
+its scaled calibration; the source `.rdlt` still retains the complete pyramid.
 
 Exports preserve spatial, temporal, and intensity calibration, image titles,
 slice labels, and string, numeric, Boolean, and byte-array properties. Original
@@ -255,11 +268,11 @@ exports preserve existing destinations. Virtual-stack decoding errors stop
 processing and export; unreadable planes are never replaced with black pixels.
 Saving over a virtual stack's source file, including an alias, is rejected.
 
-For a complete installation, download `radelta-imagej-0.8.8-fiji.zip`, extract
+For a complete installation, download `radelta-imagej-0.8.9-fiji.zip`, extract
 it, close Fiji and run `python install.py /path/to/Fiji.app`. The installer
 adds missing HDF5 dependencies, reuses existing reader libraries and disables
 older Radelta JARs. See [installation details](imagej-plugin/FIJI_BUNDLE.md).
-If the HDF5 importer is already installed, copy only `radelta-imagej-0.8.8.jar`
+If the HDF5 importer is already installed, copy only `radelta-imagej-0.8.9.jar`
 into Fiji's `plugins` folder, remove older Radelta JARs and restart Fiji.
 The release JAR includes both codecs and HDF5 decoders for all five platforms.
 
@@ -283,7 +296,7 @@ mvn --batch-mode -f imagej-plugin/pom.xml clean package
 ```
 
 This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.8.8.jar`. Install that JAR in Fiji as above.
+`imagej-plugin/target/radelta-imagej-0.8.9.jar`. Install that JAR in Fiji as above.
 A local build supports the platforms whose libraries you bundled; the release
 workflow bundles all five.
 

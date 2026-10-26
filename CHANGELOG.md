@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.9
+
+- ImageJ opens stored TIFF pyramid resolutions as virtual or RAM-loaded
+  hyperstacks, including nested SubIFDs, with scaled XY calibration;
+- Restore TIFF/OME calibration from pyramid-bearing metadata and report the
+  number of preserved pyramid images and selectable resolutions;
+- Resaving a reduced-resolution view produces a standalone image with its
+  scaled calibration.
+
 ## 0.8.5
 
 - Faster TIFF export borrows planes directly from decoded volumes/chunks and

@@ -35,6 +35,19 @@ public final class RadeltaImageFactory {
         return openForDisplay(path, rf -> loadIntoMemory ? OpenMode.MEMORY : OpenMode.VIRTUAL);
     }
 
+    /** Open a stored resolution (0 = full resolution), without a dialog. */
+    public static ImagePlus openForDisplay(String path, boolean loadIntoMemory, int resolution)
+            throws IOException {
+        return openForDisplay(path, rf -> {
+            try {
+                rf.selectResolution(resolution);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            return loadIntoMemory ? OpenMode.MEMORY : OpenMode.VIRTUAL;
+        });
+    }
+
     interface ModeChooser {
         OpenMode choose(RadeltaFile file);
     }
@@ -43,7 +56,13 @@ public final class RadeltaImageFactory {
         final RadeltaFile rf = RadeltaFile.open(path);
         boolean transferred = false;
         try {
-            final OpenMode mode = chooser.choose(rf);
+            rf.pyramids();
+            final OpenMode mode;
+            try {
+                mode = chooser.choose(rf);
+            } catch (UncheckedIOException e) {
+                throw e.getCause();
+            }
             if (mode == null) return null;
             final ImagePlus base = mode == OpenMode.MEMORY
                     ? openInMemory(path, rf) : openVirtual(path, rf);
@@ -67,6 +86,7 @@ public final class RadeltaImageFactory {
         final RadeltaFile rf = RadeltaFile.open(path);
         boolean transferred = false;
         try {
+            rf.pyramids();
             ImagePlus base = openVirtual(path, rf);
             closeWithImage((RadeltaVirtualStack) base.getStack());
             transferred = true;
@@ -104,9 +124,37 @@ public final class RadeltaImageFactory {
             );
         }
 
+        final String[] resolutions;
+        try {
+            RadeltaPyramids pyramid = rf.pyramids();
+            resolutions = new String[pyramid.levels.size() + 1];
+            resolutions[0] = rf.fullWidth + " x " + rf.fullHeight + " (full resolution)";
+            for (int i = 1; i < resolutions.length; i++)
+                resolutions[i] = pyramid.levels.get(i - 1).label();
+            if (resolutions.length > 1) {
+                gd.addChoice("Resolution", resolutions, resolutions[0]);
+                gd.addMessage("Stored pyramid: " + pyramid.imageCount + " reduced-resolution plane(s).\n"
+                        + "The pixel-memory estimate above is for full resolution.\n"
+                        + "Reduced resolutions keep the same C/Z/T dimensions.\n"
+                        + "Compressed pyramid storage in memory is additional to the estimate above.");
+            } else if (pyramid.imageCount > 0) {
+                gd.addMessage("Stored pyramid: " + pyramid.imageCount + " reduced-resolution plane(s).\n"
+                        + "No reduced level has matching dimensions across every C/Z/T plane.\n"
+                        + "The CLI can restore the complete TIFF pyramid.");
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
         gd.addChoice("Open as", new String[] { MODE_VIRTUAL, MODE_MEMORY }, MODE_VIRTUAL);
         gd.showDialog();
         if (gd.wasCanceled()) return null;
+        if (resolutions.length > 1) {
+            try {
+                rf.selectResolution(gd.getNextChoiceIndex());
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
         return MODE_MEMORY.equals(gd.getNextChoice()) ? OpenMode.MEMORY : OpenMode.VIRTUAL;
     }
 
@@ -182,6 +230,20 @@ public final class RadeltaImageFactory {
         base.setDimensions(rf.channels, rf.slices, rf.frames);
         base.setOpenAsHyperStack(rf.channels > 1 || rf.frames > 1);
         RadeltaMetadata.apply(base, rf.readMetadata());
+        if (rf.resolution() != 0) {
+            double scaleX = (double) rf.fullWidth / rf.width;
+            double scaleY = (double) rf.fullHeight / rf.height;
+            base.getCalibration().pixelWidth *= scaleX;
+            base.getCalibration().pixelHeight *= scaleY;
+            base.getCalibration().xOrigin /= scaleX;
+            base.getCalibration().yOrigin /= scaleY;
+            // A reduced view is a standalone image when resaved. Do not attach
+            // full-resolution TIFF tags and sibling pyramids to its new pixels.
+            base.setProperty(RadeltaMetadata.ORIGINAL, null);
+        }
+        base.setProperty("Radelta.Resolution", Integer.toString(rf.resolution()));
+        base.setProperty("Radelta.StoredPyramidImages", Integer.toString(rf.pyramids().imageCount));
+        base.setProperty("Radelta.ResolutionCount", Integer.toString(rf.pyramids().levels.size() + 1));
         base.setProperty("Radelta.Format", formatName(rf.format));
         base.setProperty("Radelta.Lossy", Boolean.toString(rf.lossy));
         base.setProperty("Radelta.Streaming", Boolean.toString(rf.streaming));

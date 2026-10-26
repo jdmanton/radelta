@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -77,13 +78,34 @@ class NativeStagingTests(unittest.TestCase):
                 name = f"radelta-0.7.0-{platform}-{arch}"
                 reader = f"radelta-hdf5-filter-0.7.0-{platform}-{arch}"
                 jar(native / (name + ".zip"), {f"{name}/{library}": b"core",
+                    f"{name}/radelta": b"test CLI",
                     f"{name}/python/radelta_zarr/_lib/{library}": b"wrong nested copy"})
                 jar(hdf5 / (reader + ".zip"), {f"{reader}/plugins/{decoder}": b"decoder",
                     f"{reader}/HDF5_LICENSE.txt": b"licence"})
-            stager.stage(native, hdf5, resources, "0.7.0")
+            tools = work / "test-tools"
+            stager.stage(native, hdf5, resources, "0.7.0", tools)
+            self.assertEqual((tools / "radelta").read_bytes(), b"test CLI")
+            self.assertEqual((tools / "libradelta.so").read_bytes(), b"core")
+            if os.name != "nt":
+                self.assertTrue(os.access(tools / "radelta", os.X_OK))
+            self.assertEqual(list(resources.rglob("radelta")), [])
             for platform, arch, library, decoder in stager.TARGETS:
                 self.assertEqual((resources / "natives" / f"{platform}-{arch}" / library).read_bytes(), b"core")
                 self.assertEqual((resources / "hdf5" / f"{platform}-{arch}" / decoder).read_bytes(), b"decoder")
+
+    def test_missing_test_cli_does_not_partially_stage_resources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            for platform, arch, library, decoder in stager.TARGETS:
+                name = f"radelta-0.7.0-{platform}-{arch}"
+                reader = f"radelta-hdf5-filter-0.7.0-{platform}-{arch}"
+                jar(work / "native" / (name + ".zip"), {f"{name}/{library}": b"core"})
+                jar(work / "hdf5" / (reader + ".zip"), {f"{reader}/plugins/{decoder}": b"decoder",
+                    f"{reader}/HDF5_LICENSE.txt": b"licence"})
+            with self.assertRaisesRegex(RuntimeError, "Expected one exact member.*radelta"):
+                stager.stage(work / "native", work / "hdf5", work / "resources", "0.7.0", work / "tools")
+            self.assertFalse((work / "resources").exists())
+            self.assertFalse((work / "tools").exists())
 
     def test_missing_archive_does_not_partially_stage_resources(self):
         with tempfile.TemporaryDirectory() as temp:
