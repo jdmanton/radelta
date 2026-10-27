@@ -30,6 +30,7 @@ All downloads are on the [Releases page](https://github.com/jdmanton/radelta/rel
 
 | I want to… | Download |
 | --- | --- |
+| Try lossless compression, or decode a file, without installing anything | Nothing: use [Radelta Web](#in-your-browser-no-installation) |
 | Open and save Radelta files in Fiji | `radelta-imagej-<version>.jar` |
 | …and also open Radelta-compressed HDF5 files in Fiji | `radelta-imagej-<version>-fiji.zip` |
 | Compress TIFF files from the command line | `radelta-<version>-<platform>-<arch>.zip` |
@@ -51,6 +52,23 @@ In wheel names, the platform part is:
 
 
 ## Install
+
+### In your browser (no installation)
+ 
+[Radelta Web](https://beryl.mrc-lmb.cam.ac.uk/radelta/) compresses TIFF files to `.rdlt` and decodes `.rdlt` files back to TIFF, entirely inside your web browser.
+Images are processed on your computer and are not uploaded.
+The files it writes can be opened with the command-line tool and the ImageJ/Fiji plugin.
+ 
+- **Compress:** lossless only. Accepts uint16 TIFF and BigTIFF files, including OME-TIFF, ImageJ hyperstacks and SubIFD pyramids, stored uncompressed or with LZW, Deflate or PackBits compression. Tick **Verify pixels** to check the result against the input.
+- **Decode:** lossless and calibrated-lossy `.rdlt` files, written out as BigTIFF with dimensions, calibration and descriptions kept.
+- **Single files or whole folders:** in desktop Chrome or Edge, you can choose an output folder and process a folder of files at once.
+  Other browsers download each result instead, which is limited to 256 MiB of image data per file.
+
+Currently, it does not accept RGB or other multi-sample pages, or multi-file and partial OME-TIFF datasets; please use the command-line tool for those.
+ 
+Radelta Web is **highly experimental** and is undergoing rapid development.
+Please keep your original files until you have checked the outputs!
+
 
 ### Fiji
 
