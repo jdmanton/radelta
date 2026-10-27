@@ -20,6 +20,7 @@ It works with TIFF stacks, ImageJ/Fiji, Python/NumPy, HDF5 and OME-Zarr, and off
 - [Supported data](#supported-data)
 - [How it works](#how-it-works)
 - [Lossless compression benchmark](#lossless-compression-benchmark)
+- [Lossy compression benchmark](#lossy-compression-benchmark)
 - [Documentation](#documentation)
 
 
@@ -198,38 +199,44 @@ The [file format](docs/FORMAT.md) is fully documented.
 
 The table below compares lossless compression of a typical light sheet fluorescence microscopy z-stack:
 
-- shape: `186 × 613 × 860`
-- voxels: `98,055,480`
-- uncompressed size: `187.026 MiB`
-- datatype: `uint16`
-- I/O excluded from codec timings
-- throughput reported as the median of three timed repetitions
+- Shape (TCZYX): `300 × 1 × 1 × 1006 × 1456`
+- Voxels: `439,420,800`
+- Uncompressed size: `838.129 MiB`
+- Datatype: `uint16`
 - AMD Ryzen 9 7950X 16-core CPU
-- nVidia GeForce RTX 4070 GPU
+- I/O excluded from codec timings
+- Throughput reported as the median of ten timed repetitions
 
 | Codec | Compressed size / MiB | Bits/pixel | Compression ratio | Encode / GB/s | Decode / GB/s |
 |---|---:|---:|---:|---:|---:|
-| JPEG-XL lossless, effort 9 | 15.095 | 1.291 | 12.39:1 | 0.002 | 0.059 |
-| **Radelta** | **15.659** | **1.340** | **11.94:1** | **2.496** | **5.873** |
-| JPEG-XL lossless, effort 5 | 15.829 | 1.354 | 11.82:1 | 0.007 | 0.057 |
-| JPEG-LS lossless | 16.882 | 1.444 | 11.08:1 | 0.429 | 0.485 |
-| JPEG 2000 reversible | 17.779 | 1.521 | 10.52:1 | 0.088 | 0.100 |
-| Blosc2 bitshuffle + Zstd-9 | 19.963 | 1.708 | 9.37:1 | 0.044 | 10.455 |
-| B3D GPU, HDF5, Z=8 | 20.793 | 1.779 | 8.99:1 | 1.111 | 2.959 |
-| B3D GPU, HDF5, Z=16 | 20.799 | 1.780 | 8.99:1 | 1.314 | 3.122 |
-| B3D GPU, direct filter, Z=8 | 20.793 | 1.779 | 8.99:1 | 1.883 | 3.810 |
-| B3D GPU, direct filter, Z=16 | 20.799 | 1.780 | 8.99:1 | 2.025 | 4.282 |
-| Blosc2 bitshuffle + Zstd-5 | 20.588 | 1.761 | 9.08:1 | 4.976 | 11.397 |
-| Delta-X + Zstd-15 | 23.143 | 1.980 | 8.08:1 | 0.031 | 0.686 |
-| Zstd-15 | 23.903 | 2.045 | 7.82:1 | 0.033 | 1.765 |
-| Delta-X + Zstd-3 | 25.237 | 2.159 | 7.41:1 | 0.534 | 0.662 |
-| Zstd-3 | 26.280 | 2.248 | 7.12:1 | 0.725 | 1.609 |
-| PNG | 26.447 | 2.263 | 7.07:1 | 0.122 | 0.528 |
-| Blosc2 bitshuffle + LZ4 | 26.607 | 2.276 | 7.03:1 | 12.917 | 12.733 |
+| JPEG-XL lossless, effort 9 | 216.615 | 4.135 | 3.87:1 | 0.002 | 0.372 |
+| JPEG-XL lossless, effort 5 | 225.877 | 4.312 | 3.71:1 | 0.007 | 0.357 |
+| **Radelta** | **232.938** | **4.447** | **3.60:1** | **2.811** | **6.474** |
+| JPEG 2000 reversible | 237.433 | 4.533 | 3.53:1 | 0.305 | 0.311 |
+| JPEG-LS lossless | 243.479 | 4.648 | 3.44:1 | 0.126 | 0.159 |
+| Blosc2 bitshuffle + Zstd-9 | 273.366 | 5.219 | 3.07:1 | 0.262 | 5.559 |
+| Zstd-15 | 284.512 | 5.431 | 2.95:1 | 0.005 | 0.888 |
+| Blosc2 bitshuffle + Zstd-5 | 285.928 | 5.458 | 2.93:1 | 3.063 | 11.374 |
+| Delta-X + Zstd-15 | 289.232 | 5.521 | 2.90:1 | 0.003 | 0.523 |
+| PNG | 303.723 | 5.798 | 2.76:1 | 0.028 | 0.368 |
+| Zstd-3 | 307.817 | 5.876 | 2.72:1 | 0.237 | 0.717 |
+| Delta-X + Zstd-3 | 310.481 | 5.927 | 2.70:1 | 0.229 | 0.489 |
+| Blosc2 bitshuffle + LZ4 | 312.317 | 5.962 | 2.68:1 | 6.106 | 11.340 |
 
-Radelta compresses the 187 MiB volume to 15.659 MiB (11.94:1) while encoding at 2.496 GB/s and decoding at 5.873 GB/s on the CPU. Its output is only 3.7% larger than JPEG-XL effort 9, while encoding is approximately 1234× faster and decoding approximately 100× faster. General-purpose high-throughput codecs such as Blosc2 can exceed Radelta's speed, but produce larger files.
+Radelta compresses the 838 MiB volume to 232 MiB (3.6:1) while encoding at 2.811 GB/s and decoding at 6.474 GB/s on the CPU.
+Its output is only 7.5% larger than JPEG-XL effort 9, while encoding is approximately 1400× faster and decoding approximately 17.4× faster.
+General-purpose high-throughput codecs such as Blosc2 can exceed Radelta's speed, but produce significantly larger files.
 
-The B3D measurements were obtained using an NVIDIA RTX 4070 GPU. `HDF5` rows include the HDF5 filter path, whereas `direct filter` rows measure the B3D filter directly and therefore represent its higher-throughput path. The best measured B3D result was 2.03 GB/s encoding and 4.28 GB/s decoding at approximately 20.8 MiB. Radelta therefore produced a substantially smaller file while exceeding those B3D GPU throughput measurements in this dataset, using only the CPU.
+
+## Lossy compression benchmark
+
+For the same dataset as above, with offset: 100 ADU; gain: 0.46 electrons/ADU; noise step: 2.0:
+
+| Codec | Compressed size / MiB | Bits/pixel | Compression ratio | Encode / GB/s | Decode / GB/s |
+|---|---:|---:|---:|---:|---:|
+| **Radelta (lossy)** | **19.525** | **0.373** | **42.93:1** | **5.203** | **9.220** |
+
+Compared with lossless compression, we obtain an almost 12× smaller file (43× smaller than the original) and encode/decode at even higher speeds.
 
 
 ## Documentation
