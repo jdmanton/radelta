@@ -68,6 +68,7 @@ Currently, it does not accept RGB or other multi-sample pages, or multi-file and
  
 Radelta Web is **highly experimental** and is undergoing rapid development.
 Please keep your original files until you have checked the outputs!
+Note also that compression/decompression in the browser is slower than running the CLI tools or ImageJ/Fiji plugin.
 
 
 ### Fiji
