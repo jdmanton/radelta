@@ -1,23 +1,198 @@
 # Radelta
 
-Radelta is a fast compression tool for 16-bit fluorescence microscopy images. It provides lossless and camera-calibrated lossy compression, a command-line interface, a native C/Rust library, and an ImageJ/Fiji plugin. It has been developed by James Manton, with ChatGPT providing much of the boilerplate code.
+Radelta quickly and efficiently compresses 16-bit fluorescence microscopy images, without needing a GPU.
+It works with TIFF stacks, ImageJ/Fiji, Python/NumPy, HDF5 and OME-Zarr, and offers two modes:
 
-The lossless codec is designed around a simple property of photon-counting data: shot noise grows approximately with the square root of signal intensity. For each pixel value `x`, Radelta writes
+- **Lossless** (default): every pixel is restored exactly.
+- **Calibrated lossy**: discards detail smaller than the photon shot noise, using your camera's offset and gain, for much smaller files.
 
-```text
-q = floor(sqrt(x))
-r = x - q*q
+> **Radelta is pre-1.0.** The file format can still change between releases.
+> Files written by versions 0.5.0–0.7.1 cannot be read by 0.7.2 or later.
+> Please keep your original data until you have checked the compressed copy.
+
+
+## Contents
+
+- [Which package do I need?](#which-package-do-i-need)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Lossless or lossy?](#lossless-or-lossy)
+- [Supported data](#supported-data)
+- [How it works](#how-it-works)
+- [Lossless compression benchmark](#lossless-compression-benchmark)
+- [Documentation](#documentation)
+
+
+## Which package do I need?
+
+All downloads are on the [Releases page](https://github.com/jdmanton/radelta/releases).
+
+| I want to… | Download |
+| --- | --- |
+| Open and save Radelta files in Fiji | `radelta-imagej-<version>.jar` |
+| …and also open Radelta-compressed HDF5 files in Fiji | `radelta-imagej-<version>-fiji.zip` |
+| Compress TIFF files from the command line | `radelta-<version>-<platform>-<arch>.zip` |
+| Compress NumPy arrays in Python | `radelta-<version>-py3-none-<platform>.whl` |
+| Read and write HDF5 or BigDataViewer files in Python | `radelta_hdf5-<version>-py3-none-<platform>.whl` |
+| Read and write OME-Zarr in Python | `radelta_zarr-<version>-py3-none-<platform>.whl` |
+| Use the C library in my own program | `radelta-<version>-<platform>-<arch>.zip` |
+
+Builds are provided for Windows x86-64, Linux x86-64 and ARM64, and macOS 11+ on Intel and Apple Silicon.
+In wheel names, the platform part is:
+
+| Your computer | Wheel ends in |
+| --- | --- |
+| Windows, 64-bit | `win_amd64.whl` |
+| Linux, Intel/AMD | `x86_64.whl` |
+| Linux, ARM | `aarch64.whl` |
+| Mac with Intel chip | `x86_64.whl` (starts `macosx_`) |
+| Mac with Apple chip (M1 or later) | `arm64.whl` |
+
+
+## Install
+
+### Fiji
+
+To open and save `.rdlt` files:
+
+1. Download `radelta-imagej-<version>.jar`.
+2. Close Fiji, copy the JAR into `Fiji.app/plugins`, and delete any older
+   `radelta-imagej-*.jar` there.
+3. Restart Fiji. The commands appear under **Plugins › Radelta**.
+
+To open Radelta-compressed HDF5 files as well, download `radelta-imagej-<version>-fiji.zip` instead, extract it, close Fiji and run the included installer with Python 3.8 or later:
+
+```sh
+python install.py /path/to/Fiji.app
 ```
 
-so that the original value is recovered exactly as
+This adds any missing HDF5 reader libraries and disables older Radelta JARs. See [Fiji installation](imagej-plugin/FIJI_BUNDLE.md) for details.
 
-```text
-x = q*q + r
+### Command line
+
+Download and extract `radelta-<version>-<platform>-<arch>.zip`.
+It contains the `radelta` program (`radelta.exe` on Windows); either put its folder on your `PATH`, or run it by its full path.
+
+### Python
+
+Download the wheel for your computer, then install the file with pip:
+
+```sh
+python -m pip install ./radelta-<version>-py3-none-<platform>.whl
 ```
 
-This idea of storing the radical and the delta is what gives Radelta its name. The square-root component `q` is predicted from neighbouring voxels and entropy-coded using a small causal 3-D context. The remainder `r` is coded conditional on `q`. Static probability tables and four-way interleaved byte-rANS provide the final entropy coding. Volumes are divided into independent Z blocks so that encoding and decoding can be parallelised.
+Each wheel contains its own copy of the compression library; nothing else needs installing.
+The `radelta` and `radelta_hdf5` wheels need Python 3.9+; `radelta_zarr` needs Python 3.11+.
+On Linux, the HDF5 wheel needs glibc 2.34+ (Ubuntu 22.04 or later); the others need glibc 2.28+.
 
-The lossy codec uses the same photon-counting motivation, but deliberately quantises the signal at a scale related to its expected noise. Camera values `x` are first converted from ADU to estimated photoelectrons using the specified offset and gain, `e = max((x - offset) * gain, 0)`, and then transformed as `z = 2*sqrt(e)`. For Poisson-limited data, this approximately stabilises the noise variance, so a fixed step in `z` corresponds to a similar statistical significance across different signal levels. Radelta stores `q = round(z / noise_step)` and entropy-codes `q` using spatial prediction and byte-rANS; unlike the lossless mode, no exact within-bin remainder is retained. Decoding reconstructs `z = q*noise_step`, converts back with `e = z*z/4`, and applies the inverse camera calibration. The `noise_step` parameter therefore controls the trade-off between compression and fidelity in approximately shot-noise-normalised units. This is conceptually similar to the lossy mode of [B3D](https://github.com/balintbalazs/B3D), albeit with important implementation differences for increased throughput without the need for a GPU.
+
+## Quick start
+
+### Command line
+
+```sh
+# Lossless
+radelta encode stack.tif stack.rdlt
+radelta decode stack.rdlt restored.tif
+
+# Calibrated lossy (see "Lossless or lossy?" below)
+radelta encode-lossy stack.tif stack-lossy.rdlt \
+  --offset-adu 100 --gain-e-per-adu 0.46 --noise-step 2
+```
+
+`encode` reads OME-TIFF and ImageJ dimensions automatically and keeps the TIFF metadata, which `decode` restores.
+Existing output files are replaced.
+Large stacks are compressed in bounded memory automatically (2 GiB by default; set it with `--memory-mib`). See the [command-line reference](docs/CLI.md) for all options.
+
+
+### Python
+
+```python
+import numpy as np
+import radelta
+
+image = np.random.poisson(100, size=(10, 256, 256)).astype(np.uint16)
+
+# In memory
+data = radelta.compress(image)
+assert np.array_equal(radelta.decompress(data), image)
+
+# Files: read lazily, decoding only what you index
+radelta.write("image.rdlt", image)
+with radelta.open("image.rdlt") as stack:
+    print(stack.shape, stack.axes)
+    plane = stack[5]
+    crop = stack[:, 100:150, 100:150]
+```
+
+With `radelta_hdf5` installed, the same `write`/`open` calls accept `.h5` paths. See the [Python guide](docs/PYTHON.md).
+
+
+### Fiji
+
+Drag a `.rdlt` file onto Fiji, or use **File › Open**.
+You can open it as a virtual stack, which decodes planes as you browse, or load it into memory.
+To save, use **Plugins › Radelta › Save as Radelta (lossless)…** or **(lossy)…**. Calibration, slice labels and image properties are kept; ROIs and lookup tables are not.
+
+With the Fiji bundle installed, Radelta HDF5 files open the same way, and **Save as Radelta HDF5…** writes files that h5py and other HDF5 tools can read (see [HDF5 in Fiji](hdf5/FIJI.md)).
+
+
+## Lossless or lossy?
+
+Use **lossless** unless file size is a really strong constraint.
+It is the default and restores every value exactly.
+
+**Lossy** mode uses the fact that a pixel recording `N` photoelectrons carries random shot noise of about `√N`.
+It rounds each pixel to a step that is a fixed fraction of that noise, so bright pixels are stored more coarsely than dim ones, but always below the noise.
+It needs three numbers:
+
+| Option | Meaning | Where to find it |
+| --- | --- | --- |
+| `--offset-adu` | Camera reading with no light, in ADU | Camera specification, or the mean of a dark frame |
+| `--gain-e-per-adu` | Photoelectrons per ADU (or `--gain-adu-per-e` for the inverse) | Camera specification or a photon-transfer measurement |
+| `--noise-step` | Rounding step, in units of the shot noise; larger is smaller and coarser | Default 2, which adds rounding error of about 0.58× the shot noise |
+
+Things to know before using lossy mode:
+
+- Values at or below the offset are stored as zero photons.
+  This raises the mean of very dim background regions slightly, typically by 1–2 ADU, which  matters for background-sensitive measurements.
+- Pixels may hold at most (127.75 × noise step)² photoelectrons: about 65,000 at the default step of 2.
+  Saturated pixels on a high-gain camera can exceed this, and encoding then stops with an error.
+  Increase `--noise-step` if this happens.
+- Discarded detail cannot be recovered.
+  Converting a lossy file back to lossless does not restore it.
+
+
+## Supported data
+
+- **Pixel type:** unsigned 16-bit only.
+  8-bit, 32-bit and floating-point images are not currently supported.
+- **Dimensions:** up to five (time, channel, Z, Y, X).
+  Neighbouring pixels are only used for prediction within one channel at one timepoint.
+- **TIFF input:** multipage stacks, ImageJ/Fiji hyperstacks and single-file OME-TIFF.
+  Pages with several samples stored separately are read as channels; interleaved RGB pages are rejected.
+  A file from a multi-file OME-TIFF acquisition can be compressed on its own if it holds a complete block of planes, but the files are not combined into one dataset.
+- **Metadata:** TIFF descriptions, calibration, per-plane tags and vendor tags are kept and restored on decode.
+  See [metadata handling](docs/CLI.md#metadata-preservation).
+- **Other containers:** an [HDF5 filter](hdf5/README.md) (ID 65024) for chunked datasets, including BigDataViewer XML/HDF5 export, and [OME-Zarr codecs](zarr/README.md) for Zarr v2 and v3.
+
+
+## How it works
+
+For a pixel value `x`, Radelta stores the integer square root `q = ⌊√x⌋` and the remainder `r = x − q²`, so `x = q² + r` exactly.
+This split of the **ra**dical and the **delta** gives Radelta its name.
+Because shot noise grows with `√x`, `q` is smooth and predictable from neighbouring pixels, while `r` is mostly noise.
+`q` is coded using its 3-D neighbourhood, `r` is coded given `q`, and both use static probability tables with interleaved rANS entropy coding.
+Each volume is split into independent blocks of Z-planes, which are compressed in parallel.
+
+Lossy mode converts each pixel to photoelectrons, `e = max((x − offset) × gain, 0)`, then applies `z = 2√e`.
+For photon-limited data this makes the noise roughly the same at every brightness, so `z` is rounded to multiples of
+`noise_step` and coded the same way.
+The approach is similar to the lossy mode of [B3D](https://github.com/balintbalazs/B3D), but runs on the CPU.
+
+Blocks that would not get smaller are stored uncompressed, and every block carries a CRC-32 checksum, so corruption is reported rather than decoded into wrong pixels.
+The [file format](docs/FORMAT.md) is fully documented.
+
 
 ## Lossless compression benchmark
 
@@ -56,280 +231,22 @@ Radelta compresses the 187 MiB volume to 15.659 MiB (11.94:1) while encoding at 
 
 The B3D measurements were obtained using an NVIDIA RTX 4070 GPU. `HDF5` rows include the HDF5 filter path, whereas `direct filter` rows measure the B3D filter directly and therefore represent its higher-throughput path. The best measured B3D result was 2.03 GB/s encoding and 4.28 GB/s decoding at approximately 20.8 MiB. Radelta therefore produced a substantially smaller file while exceeding those B3D GPU throughput measurements in this dataset, using only the CPU.
 
-## Lossy compression benchmark
 
-For the same z-stack and PC as for the lossless compression benchmark, a gain of 0.46 electrons per ADU, an ADU offset of 0 and a noise step of 2, we obtain:
+## Documentation
 
-| Codec | Compressed size / MiB | Bits/pixel | Compression ratio | Encode / GB/s | Decode / GB/s |
-|---|---:|---:|---:|---:|---:|
-| Radelta | 5.393 | 0.461 | 34.68:1 | 3.373 | 6.849 |
+- [Command-line reference](docs/CLI.md)
+- [Python guide](docs/PYTHON.md)
+- [Fiji installation](imagej-plugin/FIJI_BUNDLE.md) and [HDF5 in Fiji](hdf5/FIJI.md)
+- [HDF5 filter and tools](hdf5/README.md)
+- [OME-Zarr codecs and tools](zarr/README.md)
+- [C API](docs/C_API.md)
+- [File format](docs/FORMAT.md)
+- [Benchmarks](docs/BENCHMARKS.md)
+- [Building from source and contributing](docs/DEVELOPING.md)
+- [Changelog](CHANGELOG.md)
 
-## OME-Zarr
 
-The optional [OME-Zarr codecs and tools](zarr/README.md) support OME-Zarr 0.4
-(Zarr v2) and 0.5 (Zarr v3), using native Radelta compression for uint16 image
-chunks. They provide TIFF import/export, recompression of existing multiscale
-hierarchies, partial reads, lossless labels and calibrated lossy image data.
-Native release ZIPs include the matching Python codec package under `python/zarr`.
-Releases also provide self-contained `radelta_zarr` wheels for direct pip
-installation; choose the wheel for your operating system and architecture.
+## Licence and acknowledgements
 
-## Python arrays and files
-
-The self-contained `radelta` Python wheel provides a small NumPy API:
-
-```python
-import radelta
-
-encoded = radelta.compress(image)  # lossless uint16 array -> bytes
-restored = radelta.decompress(encoded)
-radelta.write("image.rdlt", image)
-with radelta.open("image.rdlt") as dataset:
-    plane = dataset[10]
-```
-
-Install the wheel for your platform; its native codec is included. NumPy is
-the only core dependency. The optional `radelta_hdf5` wheel adds HDF5 file
-access and automatically registers its bundled filter with h5py. See the
-[Python quickstart and API guide](docs/PYTHON.md) for installation, array axes,
-calibrated lossy compression and partial reads.
-
-## Release packages
-
-Each version has one GitHub release with separate installation assets:
-
-| Asset | Contents |
-|---|---|
-| `radelta-<version>-<platform>-<arch>.zip` | CLI, C library/header, documentation and optional Zarr source package |
-| `radelta_zarr-<version>-py3-none-<platform>.whl` | Python Zarr codec/converter with the matching native library |
-| `radelta-<version>-py3-none-<platform>.whl` | NumPy array compression and lazy `.rdlt` file access, with native codec included |
-| `radelta_hdf5-<version>-py3-none-<platform>.whl` | h5py helpers and BDV exporter with an automatically registered native filter |
-| `radelta-hdf5-<version>-<platform>-<arch>.zip` | HDF5 filter, compatible runtime/tools and Python helpers |
-| `radelta-hdf5-filter-<version>-<platform>-<arch>.zip` | Standalone native filter for applications with an existing HDF5 runtime; already included in the ImageJ JAR |
-| `radelta-imagej-<version>.jar` | ImageJ plugin with native codecs and HDF5 decoders for all five platforms |
-| `radelta-imagej-<version>-fiji.zip` | Complete Fiji installation: Radelta JAR, HDF5 importer/dependencies and installer |
-
-Zarr wheels are tested in isolated installations before being uploaded.
-Linux builds use a glibc 2.28 baseline; macOS builds target 11.0 or later.
-The native library is built once per platform and reused for the native ZIP,
-Zarr wheel and ImageJ assets. HDF5 is built separately.
-
-## HDF5 files
-
-The optional [HDF5 plugin and file tools](hdf5/README.md) store chunked uint16
-datasets using lossless or calibrated-lossy Radelta compression. Standard HDF5
-readers can access slices and regions with the plugin installed. The companion
-`radelta-hdf5` command imports TIFF stacks, exports TIFF stacks and recompresses
-existing HDF5 datasets. Native codec builds do not require HDF5.
-
-`radelta-hdf5 bdv input.tif output.xml` exports tiled, multiresolution
-BigDataViewer XML/HDF5 datasets without loading the whole volume. It also
-accepts an existing HDF5 dataset. See [BDV export](hdf5/README.md#bigdataviewer-export).
-
-For ImageJ/Fiji, install the [complete Fiji bundle](imagej-plugin/FIJI_BUNDLE.md).
-The existing Radelta ImageJ JAR includes the HDF5 decoder and registers it
-automatically with the HDF5_Vibez/JHDF5 importer. No environment-variable
-configuration or second HDF5 SDK is needed.
-
-## Building
-
-The native codec requires Rust. From the repository root:
-
-```sh
-cargo test --release --manifest-path native/Cargo.toml
-cargo build --release --manifest-path native/Cargo.toml
-```
-
-Build outputs are in `native/target/release/`. The command-line program is
-`radelta` (`radelta.exe` on Windows). Shared-library filenames differ between
-Cargo's build outputs and the packaged releases:
-
-| Platform | Cargo output | Release filename |
-| --- | --- | --- |
-| Windows | `radelta_native.dll` | `radelta.dll` |
-| Linux | `libradelta_native.so` | `libradelta.so` |
-| macOS | `libradelta_native.dylib` | `libradelta.dylib` |
-
-To create a native release ZIP, run this from the repository root, choosing
-`windows`, `linux`, or `macos` as appropriate:
-
-```sh
-python scripts/package_native.py --platform windows
-```
-
-The packager handles renaming the shared library and includes the CLI, C
-header, and documentation.
-
-Blocks automatically use raw storage when entropy coding would not save space,
-including block overhead. Shared probability models are omitted when storing a
-whole volume raw is smaller. This applies to the CLI and native, Python, HDF5
-and Zarr integrations. Lossy raw blocks retain the quantized values.
-Raw and compressed blocks are both part of format version 1.
-See the [file format](docs/FORMAT.md#raw-block-fallback) for details.
-
-## Metadata
-
-Radelta can attach arbitrary metadata bytes to any image container, compressed
-separately with fast LZ4 and a raw fallback. The configurable metadata limit
-defaults to 1024 MiB; the CLI accepts `--metadata-limit-mib N`. Rust and C APIs support reading,
-replacing, and removing metadata without recompressing pixels. TIFF conversion
-preserves descriptions, calibration and per-plane tags, vendor binary records,
-and EXIF/GPS directories, restoring the original page order by default.
-See [metadata behaviour](docs/CLI.md#metadata-preservation).
-
-## Command-line use
-
-Measure in-memory codec performance with `radelta benchmark input.tif` or
-`radelta benchmark-lossy input.tif --offset-adu 0 --gain-e-per-adu 0.46 --noise-step 2`.
-Both support `--repeats N`; see [CLI timing details](docs/CLI.md#measuring-codec-performance).
-
-Compress a TIFF losslessly:
-
-```bash
-radelta encode input.tif output.rdlt
-```
-
-Decompress it:
-
-```bash
-radelta decode output.rdlt restored.tif
-```
-
-Camera-calibrated lossy compression:
-
-```bash
-radelta encode-lossy input.tif output.rdlt \
-  --offset-adu 100 \
-  --gain-e-per-adu 0.46 \
-  --noise-step 2
-```
-
-See [docs/CLI.md](docs/CLI.md) for the full command-line reference.
-
-## Supported microscopy data
-
-The CLI reads grayscale `uint16` TIFF data and understands:
-
-- ordinary multipage TIFF stacks;
-- pages storing several `uint16` samples per pixel in planar (separate)
-  layout, whose samples are read as channels;
-- OME-TIFF metadata, including the local planes of a multi-file acquisition;
-- ImageJ/Fiji hyperstacks; and
-- supported contiguous ImageJ/tifffile hyperstacks.
-
-Internally, multidimensional data use contiguous `T,C,Z,Y,X` order with X fastest. Spatial prediction is confined to each `(T,C)` volume.
-
-Large datasets can be written in a bounded-memory streaming form. ImageJ opens these through a virtual stack and decodes only the chunk containing the requested plane.
-
-## ImageJ/Fiji
-
-The plugin can open `.rdlt` / `.radelta` files and export datasets using either lossless or calibrated-lossy compression.
-It also opens Radelta-compressed HDF5 files through the existing Fiji HDF5
-importer, using the filter bundled in the same JAR. Drag such a file onto Fiji,
-use File > Open, or choose **Plugins → Radelta → Open HDF5…**; `.rdlt` opening
-and export commands remain available.
-**Save as Radelta HDF5 (lossless)…** and **(lossy)…** write HDF5 datasets that
-Fiji, h5py and the `radelta-hdf5` tools can read; see
-[Writing from Fiji](hdf5/FIJI.md#writing-from-fiji).
-
-Opening from the Radelta menu, File > Open, or drag-and-drop offers a choice
-between a virtual stack (the default) and loading the entire dataset into RAM.
-The dialog shows the dataset dimensions, format, minimum 16-bit pixel storage,
-Java heap limit, and approximate unused heap. Full loading reports progress and
-closes the source file once complete; virtual loading decodes planes on demand.
-For CLI-encoded TIFF pyramids, the same dialog offers a **Resolution** choice.
-Level 0 is the full-resolution image; additional entries use the original stored
-SubIFD pixels, including nested levels. Each selection retains C/Z/T dimensions
-and scales XY pixel calibration to the selected image size. Only levels present
-at the same SubIFD path and dimensions for every primary plane are offered as
-hyperstacks; irregular pyramids remain preserved for CLI TIFF restoration.
-Both modes restore the stored metadata. The memory estimate excludes Java/ImageJ
-and native decoding overhead. Stored pyramid payloads remain compressed in
-memory while a virtual stack is open and are additional to the pixel estimate.
-
-Headless opening defaults to a virtual stack. Scripts can explicitly select a
-mode with `RadeltaImageFactory.openForDisplay(path, loadIntoMemory)`;
-`openBase(path)` remains a non-interactive full-resolution virtual-stack reader.
-Use `RadeltaImageFactory.openForDisplay(path, loadIntoMemory, resolution)` to
-select a stored resolution from a script (0 is full resolution). Image properties
-`Radelta.ResolutionCount` and `Radelta.StoredPyramidImages` report selectable
-resolutions and the total preserved reduced-image count. Ordinary files have one
-resolution. A reduced view resaved from ImageJ becomes a standalone image with
-its scaled calibration; the source `.rdlt` still retains the complete pyramid.
-
-Exports preserve spatial, temporal, and intensity calibration, image titles,
-slice labels, and string, numeric, Boolean, and byte-array properties. Original
-opaque metadata is retained when a Radelta file is edited and resaved. TIFF
-metadata from the CLI supplies common ImageJ/OME calibration on opening.
-Arbitrary Java objects, ROIs, and display LUTs are not serialized.
-
-Exports publish only after all pixels and metadata have been written. Failed
-exports preserve existing destinations. Virtual-stack decoding errors stop
-processing and export; unreadable planes are never replaced with black pixels.
-Saving over a virtual stack's source file, including an alias, is rejected.
-
-For a complete installation, download `radelta-imagej-0.8.9-fiji.zip`, extract
-it, close Fiji and run `python install.py /path/to/Fiji.app`. The installer
-adds missing HDF5 dependencies, reuses existing reader libraries and disables
-older Radelta JARs. See [installation details](imagej-plugin/FIJI_BUNDLE.md).
-If the HDF5 importer is already installed, copy only `radelta-imagej-0.8.9.jar`
-into Fiji's `plugins` folder, remove older Radelta JARs and restart Fiji.
-The release JAR includes both codecs and HDF5 decoders for all five platforms.
-
-To build the plugin from source, install Rust, JDK 17, and Maven. First build
-the native library using the commands above. Copy the shared library from
-`native/target/release/` into the matching location below, creating the folders
-as needed. Paths are relative to `imagej-plugin/src/main/resources/`:
-
-| Platform | Bundled library path |
-| --- | --- |
-| Windows x86-64 | `natives/windows-x86_64/radelta.dll` |
-| Linux x86-64 | `natives/linux-x86_64/libradelta.so` |
-| Linux ARM64 | `natives/linux-aarch64/libradelta.so` |
-| macOS Intel | `natives/macos-x86_64/libradelta.dylib` |
-| macOS Apple Silicon | `natives/macos-aarch64/libradelta.dylib` |
-
-Then, from the repository root:
-
-```sh
-mvn --batch-mode -f imagej-plugin/pom.xml clean package
-```
-
-This runs headless integration tests against the bundled library and creates
-`imagej-plugin/target/radelta-imagej-0.8.9.jar`. Install that JAR in Fiji as above.
-A local build supports the platforms whose libraries you bundled; the release
-workflow bundles all five.
-
-For HDF5 support in a manual build, also build the embedded HDF5 target and
-copy its library into `src/main/resources/hdf5/<platform>-<arch>/` before
-building the JAR. The [HDF5 build instructions](hdf5/README.md) describe that
-target. Reader dependencies are supplied by Fiji or the complete bundle.
-
-For development without bundling, set `RADELTA_NATIVE_LIBRARY` to the absolute
-path of the Cargo-built shared library before running Maven, and also in the
-environment used to launch Fiji.
-
-## Native API
-
-The C API is declared in `native/include/radelta.h`. It supports in-memory compression/decompression, multidimensional data, random plane access, and bounded-memory streaming writers.
-
-See [docs/C_API.md](docs/C_API.md) for examples.
-
-## File formats
-
-Radelta uses six closely related container types:
-
-| Magic | Purpose |
-| --- | --- |
-| `RDL1` | lossless XYZ volume |
-| `RDLQ` | calibrated-lossy XYZ volume |
-| `RDM2` | lossless TCZYX container |
-| `RDQ2` | calibrated-lossy TCZYX container |
-| `RDS3` | lossless streaming TCZYX container |
-| `RQS3` | calibrated-lossy streaming TCZYX container |
-
-See [docs/FORMAT.md](docs/FORMAT.md) for the format details.
-
-## License
-
-Radelta is distributed under the BSD 3-Clause License. See [LICENSE](LICENSE).
+Radelta was created by James Manton and is distributed under the BSD 3-Clause License; see [LICENSE](LICENSE).
+Much of the boilerplate code was written using ChatGPT.
