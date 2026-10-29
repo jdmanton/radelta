@@ -19,6 +19,8 @@ final class RadeltaFile implements Closeable {
     private byte[] metadata, tiffMetadata;
     private RadeltaPyramids pyramids;
     private int resolution;
+    private int fullBitDepth = 16;
+    int bitDepth = 16;
     final int format, flags;
     final boolean lossy, streaming;
 
@@ -84,6 +86,7 @@ final class RadeltaFile implements Closeable {
 
     synchronized RadeltaPyramids pyramids() throws IOException {
         if (pyramids == null) {
+            fullBitDepth = bitDepth = RadeltaMetadata.bitDepth(readMetadata());
             tiffMetadata = RadeltaMetadata.sourceTiff(readMetadata());
             pyramids = RadeltaPyramids.parse(tiffMetadata, planeCount());
         }
@@ -95,6 +98,7 @@ final class RadeltaFile implements Closeable {
         if (index < 0 || index > pyramids().levels.size())
             throw new IOException("No stored Radelta resolution " + index);
         resolution = index;
+        bitDepth = index == 0 ? fullBitDepth : pyramids.levels.get(index - 1).planes[0].bitDepth;
         width = index == 0 ? fullWidth : pyramids.levels.get(index - 1).width;
         height = index == 0 ? fullHeight : pyramids.levels.get(index - 1).height;
     }
@@ -164,7 +168,7 @@ final class RadeltaFile implements Closeable {
                 .multiply(BigInteger.valueOf(slices))
                 .multiply(BigInteger.valueOf(channels))
                 .multiply(BigInteger.valueOf(frames))
-                .multiply(BigInteger.valueOf(2L));
+                .multiply(BigInteger.valueOf(bitDepth / 8));
     }
 
     @Override

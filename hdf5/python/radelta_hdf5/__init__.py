@@ -91,7 +91,7 @@ def default_chunks(shape, target_mib=8):
 
 
 def create_dataset(group, name, *, shape=None, data=None, chunks=None,
-                   dtype=np.uint16, maxshape=None, target_mib=8,
+                   dtype=None, maxshape=None, target_mib=8,
                    filter_id=FILTER_ID, **codec):
     """Create a mandatory Radelta-filtered dataset; usual h5py slicing applies.
 
@@ -105,13 +105,17 @@ def create_dataset(group, name, *, shape=None, data=None, chunks=None,
     if shape is None:
         raise ValueError("Provide shape or data")
     shape = tuple(operator.index(v) for v in shape)
+    if dtype is None:
+        dtype = data.dtype if data is not None else np.uint16
     dtype = np.dtype(dtype)
-    if dtype.kind != "u" or dtype.itemsize != 2:
-        raise ValueError("Radelta requires uint16")
+    if dtype.kind != "u" or dtype.itemsize not in (1, 2):
+        raise ValueError("Radelta requires uint8 or uint16")
     if not 2 <= len(shape) <= 5 or any(v < 0 for v in shape):
         raise ValueError("Expected rank 2..5 in canonical TCZYX order")
-    if data is not None and (data.shape != shape or data.dtype.kind != "u" or data.dtype.itemsize != 2):
-        raise ValueError("Data must be uint16 and match shape")
+    if data is not None and (data.shape != shape or data.dtype.kind != "u" or data.dtype.itemsize not in (1, 2)):
+        raise ValueError("Data must be uint8 or uint16 and match shape")
+    if data is not None and dtype.itemsize == 1 and np.any(data > 255):
+        raise ValueError("Data exceeds uint8 range")
     if chunks is None:
         chunks = default_chunks(tuple(max(1, v) for v in shape), target_mib)
     chunks = tuple(operator.index(v) for v in chunks)
@@ -125,11 +129,13 @@ def create_dataset(group, name, *, shape=None, data=None, chunks=None,
     sizes = dict(zip("TCZYX"[-len(chunks):], chunks))
     opts = filter_options(**codec) + tuple(sizes.get(axis, 1) for axis in "XYZCT") + (
         int(dtype.str.startswith(">")),)
+    if dtype.itemsize == 1:
+        opts += (1,)
     config = h5py.h5z.get_filter_info(filter_id)
     if not config & h5py.h5z.FILTER_CONFIG_ENCODE_ENABLED:
         raise RuntimeError("Radelta filter cannot encode")
     # The embedded filter cannot derive geometry through HDF5 callbacks, so
-    # supply all 17 parameters and make the filter mandatory ourselves. This
+    # supply 17 parameters (18 for uint8) and make the filter mandatory ourselves. This
     # also works with SDK filters, which independently check the geometry.
     dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
     dcpl.set_chunk(chunks)
@@ -137,7 +143,7 @@ def create_dataset(group, name, *, shape=None, data=None, chunks=None,
     ds = group.create_dataset(name, shape=shape, dtype=dtype, chunks=chunks,
                               maxshape=maxshape, dcpl=dcpl)
     ds.attrs["axes"] = "TCZYX"[-len(shape):]
-    ds.attrs["radelta_version"] = "0.8.9"
+    ds.attrs["radelta_version"] = "0.9.0"
     ds.attrs["radelta_lossy"] = bool(codec.get("lossy", False))
     if codec.get("lossy", False):
         for key, default in (("offset_adu", 0.0), ("gain_e_per_adu", 1.0), ("noise_step", 2.0)):

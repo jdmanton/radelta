@@ -44,6 +44,29 @@ class FilterTests(unittest.TestCase):
                 self.assertIn(payload[:4], (b"RDL1", b"RDM2"))
         return data
 
+    def test_uint8_chunk_geometry_dtype_inference_and_lossy_saturation(self):
+        data = np.arange(512, dtype=np.uint16).astype(np.uint8).reshape(2, 16, 16)
+        for lossy in (False, True):
+            with h5py.File(self.path, "w") as f:
+                ds = create_dataset(f, "images", data=data, chunks=(1, 7, 9), lossy=lossy)
+                self.assertEqual(ds.dtype, np.uint8)
+                dcpl = ds.id.get_create_plist()
+                self.assertEqual(dcpl.get_chunk(), (1, 7, 9))
+                self.assertEqual(dcpl.get_nfilters(), 1)
+                # Older h5py uses a fixed 16-word get_filter() buffer but can
+                # return the full parameter count. Entries beyond 16 are then
+                # garbage, even when len(params) >= 18. Check the byte width
+                # through dtype/pixel round trips and verify actual filtering.
+                ds.id.flush()
+                mask, payload = ds.id.read_direct_chunk((0, 0, 0))
+                self.assertEqual(mask, 0)
+                self.assertIn(payload[:4], (b"RDQ2", b"RDLQ") if lossy else (b"RDM2", b"RDL1"))
+            expected = np.minimum(np.floor(np.sqrt(data.astype(float))+.5)**2, 255).astype(np.uint8) if lossy else data
+            with h5py.File(self.path) as f:
+                self.assertEqual(f["images"].dtype, np.uint8)
+                np.testing.assert_array_equal(f["images"][:], expected)
+                np.testing.assert_array_equal(f["images"][:, ::2, :], expected[:, ::2, :])
+
     def test_ranks_endianness_edges_contexts(self):
         for shape, chunks in (((13, 17), (7, 9)), ((5, 13, 17), (3, 7, 9)),
                               ((2, 5, 13, 17), (2, 3, 7, 9)),
@@ -111,14 +134,14 @@ class FilterTests(unittest.TestCase):
 
     def test_bad_dtype_and_options(self):
         with h5py.File(self.path, "w") as f:
-            for dtype in (np.float32, np.int16, np.uint8):
+            for dtype in (np.float32, np.int16, np.uint32):
                 with self.assertRaises(ValueError):
                     create_dataset(f, "bad", shape=(10, 10), dtype=dtype)
             for opts in ({"scale_bits": 12}, {"context": "unknown"},
                          {"lossy": True, "gain_e_per_adu": 0}, {"noise_step": float("nan")}):
                 with self.assertRaises(ValueError):
                     create_dataset(f, "bad", shape=(10, 10), **opts)
-            for dtype in (np.int16, np.float32, np.uint8):
+            for dtype in (np.int16, np.float32, np.uint32):
                 with self.assertRaises(ValueError):
                     f.create_dataset("bad", shape=(10, 10), dtype=dtype,
                                      chunks=(5, 5), compression=FILTER_ID)

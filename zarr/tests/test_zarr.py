@@ -39,6 +39,29 @@ class NativeCase(unittest.TestCase):
 
 
 class CodecTests(NativeCase):
+    def test_uint8_chunks_arrays_pyramids_and_lossy_saturation(self):
+        data = np.arange(512, dtype=np.uint16).astype(np.uint8).reshape(2, 16, 16)
+        for lossy in (False, True):
+            opts = validate_options(dict(lossy=lossy))
+            expected = np.minimum(np.floor(np.sqrt(data.astype(float))+.5)**2, 255).astype(np.uint8) if lossy else data
+            encoded = encode_chunk(data, "zyx", opts)
+            decoded = decode_chunk(encoded, data.shape, "zyx", "u1", opts)
+            self.assertEqual(decoded.dtype, np.uint8)
+            np.testing.assert_array_equal(decoded, expected)
+            with self.assertRaises(ValueError):
+                decode_chunk(encoded, data.shape, "zyx", "u2", opts)
+            codec = RadeltaNumcodec(data.shape, dtype="u1", **opts)
+            self.assertEqual(codec.decode(codec.encode(data)), expected.tobytes())
+            for version in (2, 3):
+                group = zarr.open_group(str(self.path / f"bytes-{lossy}-{version}"), mode="w", zarr_format=version)
+                write_image(group, data, chunks=(1, 7, 9), levels=1 if lossy else 2, **opts)
+                self.assertEqual(group["0"].dtype, np.uint8)
+                np.testing.assert_array_equal(group["0"][:], expected)
+                if not lossy:
+                    self.assertEqual(group["1"].dtype, np.uint8)
+                    expected_child = ((data[:,0::2,0::2].astype(np.uint32)+data[:,1::2,0::2]+data[:,0::2,1::2]+data[:,1::2,1::2]+2)//4).astype(np.uint8)
+                    np.testing.assert_array_equal(group["1"][:], expected_child)
+
     def test_native_frame_bytes_and_encoded_buffer_inputs(self):
         pixels = self.rng.integers(0, 65536, (3, 7, 9), dtype=np.uint16)
         options = validate_options({})

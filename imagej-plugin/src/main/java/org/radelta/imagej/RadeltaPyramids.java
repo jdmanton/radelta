@@ -15,12 +15,13 @@ import java.util.Map;
 /** Index into the existing TIFF metadata payload; compressed pixels are not copied. */
 final class RadeltaPyramids {
     static final class Plane {
-        final int width, height, offset, length;
-        Plane(int width, int height, int offset, int length) {
+        final int width, height, offset, length, bitDepth;
+        Plane(int width, int height, int offset, int length, int bitDepth) {
             this.width = width;
             this.height = height;
             this.offset = offset;
             this.length = length;
+            this.bitDepth = bitDepth;
         }
     }
 
@@ -99,6 +100,10 @@ final class RadeltaPyramids {
             for (Plane plane : planes)
                 if (plane == null || planes[0] == null || plane.width != planes[0].width
                         || plane.height != planes[0].height) complete = false;
+            if (complete) {
+                for (Plane plane : planes) if (plane.bitDepth != planes[0].bitDepth)
+                    throw new IOException("Mixed pyramid sample depths are unsupported");
+            }
             if (complete) result.levels.add(new Level(entry.getKey(), planes));
         }
     }
@@ -110,7 +115,9 @@ final class RadeltaPyramids {
         if (width <= 0 || height <= 0 || width > Integer.MAX_VALUE || height > Integer.MAX_VALUE
                 || width * height > Integer.MAX_VALUE)
             throw new IOException("TIFF pyramid plane exceeds ImageJ array limits");
-        RadeltaMetadata.readTags(in, null, depth);
+        Map<Integer, byte[]> tags = new LinkedHashMap<Integer, byte[]>();
+        RadeltaMetadata.readTags(in, tags, depth);
+        int bitDepth = RadeltaMetadata.savedBitDepth(tags);
         int length = count(in, 1, "codec length");
         if (length < 4 || in.get(in.position()) != 'R' || in.get(in.position() + 1) != 'D'
                 || in.get(in.position() + 2) != 'L' || in.get(in.position() + 3) != '1')
@@ -121,7 +128,7 @@ final class RadeltaPyramids {
                 planes = new LinkedHashMap<Integer, Plane>();
                 groups.put(path, planes);
             }
-            planes.put(parent, new Plane((int) width, (int) height, in.position(), length));
+            planes.put(parent, new Plane((int) width, (int) height, in.position(), length, bitDepth));
         }
         in.position(in.position() + length);
         if (result != null) result.imageCount++;

@@ -16,18 +16,18 @@ fn child<K: TiffKind>(
     y: u32,
     value: u16,
     children: &[u64],
-    eight_bit: bool,
+    unsupported: bool,
 ) -> u64 {
     let mut dir = enc.extra_directory().unwrap();
     let data = vec![value; (x * y) as usize];
-    let offset = if eight_bit {
-        dir.write_data(vec![7u8; data.len()].as_slice()).unwrap()
+    let offset = if unsupported {
+        dir.write_data(vec![7u32; data.len()].as_slice()).unwrap()
     } else {
         dir.write_data(data.as_slice()).unwrap()
     };
     dir.write_tag(Tag::ImageWidth, x).unwrap();
     dir.write_tag(Tag::ImageLength, y).unwrap();
-    dir.write_tag(Tag::BitsPerSample, if eight_bit { 8u16 } else { 16u16 })
+    dir.write_tag(Tag::BitsPerSample, if unsupported { 32u16 } else { 16u16 })
         .unwrap();
     dir.write_tag(Tag::Compression, 1u16).unwrap();
     dir.write_tag(Tag::PhotometricInterpretation, 1u16).unwrap();
@@ -36,7 +36,7 @@ fn child<K: TiffKind>(
     dir.write_tag(Tag::StripOffsets, offset).unwrap();
     dir.write_tag(
         Tag::StripByteCounts,
-        (x * y) * if eight_bit { 1 } else { 2 },
+        (x * y) * if unsupported { 4 } else { 2 },
     )
     .unwrap();
     dir.write_tag(Tag::NewSubfileType, 1u32).unwrap();

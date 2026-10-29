@@ -1,4 +1,4 @@
-//! Bulk I/O for uncompressed uint16 strips. Other TIFF layouts retain the
+//! Bulk I/O for uncompressed uint8/uint16 strips. Other TIFF layouts retain the
 //! TIFF decoder's predictor, decompression, tile and photometric handling.
 use std::io::{Read, Seek, SeekFrom};
 use tiff::{
@@ -20,6 +20,52 @@ pub fn read_u16<R: Read>(reader: &mut R, out: &mut [u16], order: ByteOrder) -> R
         }
     }
     Ok(())
+}
+
+pub fn read_unsigned<R: Read>(
+    reader: &mut R,
+    out: &mut [u16],
+    bytes: usize,
+    order: ByteOrder,
+) -> Result<(), String> {
+    if bytes == 2 {
+        return read_u16(reader, out, order);
+    }
+    if bytes != 1 {
+        return Err("expected 8-bit or 16-bit unsigned samples".into());
+    }
+    let mut buffer = [0u8; 64 * 1024];
+    for chunk in out.chunks_mut(buffer.len()) {
+        reader
+            .read_exact(&mut buffer[..chunk.len()])
+            .map_err(|e| e.to_string())?;
+        for (dst, &src) in chunk.iter_mut().zip(&buffer) {
+            *dst = u16::from(src);
+        }
+    }
+    Ok(())
+}
+
+/// Validate sample storage before using either TIFF decoding or raw I/O.
+pub fn sample_bytes<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<usize, String> {
+    let bits = dec
+        .get_tag_u16_vec(Tag::BitsPerSample)
+        .map_err(|e| e.to_string())?;
+    let unsigned = dec
+        .find_tag(Tag::SampleFormat)
+        .map_err(|e| e.to_string())?
+        .map(|v| v.into_u16_vec())
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .is_none_or(|v| !v.is_empty() && v.iter().all(|&f| f == 1));
+    if !unsigned
+        || bits.is_empty()
+        || !matches!(bits[0], 8 | 16)
+        || bits.iter().any(|&b| b != bits[0])
+    {
+        return Err("expected unsigned 8-bit or 16-bit TIFF samples".into());
+    }
+    Ok(usize::from(bits[0] / 8))
 }
 
 fn strip_table<R: Read + Seek>(dec: &mut Decoder<R>, tag: Tag) -> Result<Vec<u64>, String> {
@@ -58,11 +104,80 @@ fn strip_table<R: Read + Seek>(dec: &mut Decoder<R>, tag: Tag) -> Result<Vec<u64
     }
 }
 
+/// Read byte tiles with a full tile-width stride, then crop the padding.
+/// Besides avoiding row-wise padding copies, this avoids the TIFF LZW
+/// reader's repeated short-read/end-code issue on padded byte tiles.
+pub fn read_u8_tiled_sample<R: Read + Seek>(
+    dec: &mut Decoder<R>,
+    out: &mut [u16],
+    sample: usize,
+) -> Result<bool, String> {
+    use tiff::decoder::ChunkType;
+    if dec.get_chunk_type() != ChunkType::Tile || sample_bytes(dec)? != 1 {
+        return Ok(false);
+    }
+    let (w, h) = dec.dimensions().map_err(|e| e.to_string())?;
+    let (w, h) = (w as usize, h as usize);
+    if w.checked_mul(h) != Some(out.len()) {
+        return Err("TIFF plane size mismatch".into());
+    }
+    let (tw, th) = dec.chunk_dimensions();
+    let (tw, th) = (tw as usize, th as usize);
+    if tw == 0 || th == 0 {
+        return Err("invalid TIFF tile dimensions".into());
+    }
+    let across = w.div_ceil(tw);
+    let per_plane = across
+        .checked_mul(h.div_ceil(th))
+        .ok_or("TIFF tile count overflow")?;
+    let count = dec.tile_count().map_err(|e| e.to_string())? as usize;
+    let samples = dec.get_tag_u64(Tag::SamplesPerPixel).unwrap_or(1) as usize;
+    if samples == 0 || sample >= samples || per_plane.checked_mul(samples) != Some(count) {
+        return Err("invalid TIFF tile count".into());
+    }
+    let mut buffer = DecodingResult::U8(Vec::new());
+    for k in 0..per_plane {
+        let index =
+            u32::try_from(sample * per_plane + k).map_err(|_| "TIFF tile index overflow")?;
+        dec.read_chunk_to_buffer(&mut buffer, index, tw)
+            .map_err(|e| e.to_string())?;
+        let DecodingResult::U8(pixels) = &buffer else {
+            return Err("expected uint8 TIFF tiles".into());
+        };
+        let x0 = k % across * tw;
+        let y0 = k / across * th;
+        let width = tw.min(w - x0);
+        let height = th.min(h - y0);
+        if pixels.len() < (height - 1) * tw + width {
+            return Err("truncated TIFF tile".into());
+        }
+        for row in 0..height {
+            for (dst, &src) in out[(y0 + row) * w + x0..(y0 + row) * w + x0 + width]
+                .iter_mut()
+                .zip(&pixels[row * tw..row * tw + width])
+            {
+                *dst = u16::from(src);
+            }
+        }
+    }
+    Ok(true)
+}
+
 pub fn read_plane<R: Read + Seek>(dec: &mut Decoder<R>, out: &mut [u16]) -> Result<(), String> {
+    sample_bytes(dec)?;
     if read_raw_sample_plane(dec, out, 0)? {
         return Ok(());
     }
+    if read_u8_tiled_sample(dec, out, 0)? {
+        return Ok(());
+    }
     match dec.read_image().map_err(|e| e.to_string())? {
+        DecodingResult::U8(v) if v.len() == out.len() => {
+            for (dst, src) in out.iter_mut().zip(v) {
+                *dst = u16::from(src);
+            }
+            Ok(())
+        }
         DecodingResult::U16(v) if v.len() == out.len() => {
             out.copy_from_slice(&v);
             Ok(())
@@ -72,7 +187,7 @@ pub fn read_plane<R: Read + Seek>(dec: &mut Decoder<R>, out: &mut [u16]) -> Resu
             out.len(),
             v.len()
         )),
-        _ => Err("expected uint16 grayscale TIFF".into()),
+        _ => Err("expected uint8 or uint16 grayscale TIFF".into()),
     }
 }
 
@@ -102,6 +217,7 @@ pub fn read_raw_sample_plane<R: Read + Seek>(
     let Some(runs) = raw_runs(dec, out.len(), sample)? else {
         return Ok(false);
     };
+    let bytes = sample_bytes(dec)?;
     let order = dec.byte_order();
     let reader = dec.inner();
     let mut start = 0;
@@ -112,7 +228,7 @@ pub fn read_raw_sample_plane<R: Read + Seek>(
                 .seek(SeekFrom::Start(offset))
                 .map_err(|e| e.to_string())?;
         }
-        read_u16(reader, &mut out[start..start + samples], order)?;
+        read_unsigned(reader, &mut out[start..start + samples], bytes, order)?;
         start += samples;
     }
     Ok(true)
@@ -160,10 +276,13 @@ fn raw_runs<R: Read + Seek>(
         || scalar(dec, Tag::FillOrder, 1)? != 1
         || scalar(dec, Tag::PhotometricInterpretation, 1)? != 1
         || bits.len() != samples
-        || bits.iter().any(|&b| b != 16)
+        || bits.is_empty()
+        || !matches!(bits[0], 8 | 16)
+        || bits.iter().any(|&b| b != bits[0])
     {
         return Ok(None);
     }
+    let bytes = u64::from(bits[0] / 8);
     let (w, h) = dec.dimensions().map_err(|e| e.to_string())?;
     if (w as usize).checked_mul(h as usize) != Some(plane_samples) {
         return Err("TIFF plane size mismatch".into());
@@ -183,16 +302,16 @@ fn raw_runs<R: Read + Seek>(
     let mut runs: Vec<(u64, usize)> = Vec::new();
     let mut remaining = h as u64;
     for (&offset, &count) in offsets[range.clone()].iter().zip(&counts[range]) {
-        let expected = remaining.min(rows) * w as u64 * 2;
+        let expected = remaining.min(rows) * w as u64 * bytes;
         if count != expected {
             return Ok(None);
         }
         offset
             .checked_add(count)
             .ok_or("TIFF strip offset overflow")?;
-        let n = usize::try_from(count / 2).map_err(|_| "TIFF strip size overflow")?;
+        let n = usize::try_from(count / bytes).map_err(|_| "TIFF strip size overflow")?;
         if let Some((last, len)) = runs.last_mut() {
-            if last.checked_add((*len as u64) * 2) == Some(offset) {
+            if last.checked_add((*len as u64) * bytes) == Some(offset) {
                 *len += n;
                 remaining -= remaining.min(rows);
                 continue;

@@ -158,7 +158,10 @@ fn capture_image(
             .map_err(|e| e.to_string())?
             .unwrap_or(1)
             != 1
-        || dec.colortype().map_err(|e| e.to_string())? != tiff::ColorType::Gray(16)
+        || !matches!(
+            dec.colortype().map_err(|e| e.to_string())?,
+            tiff::ColorType::Gray(8 | 16)
+        )
         || dec
             .find_tag(Tag::PhotometricInterpretation)
             .map_err(|e| e.to_string())?
@@ -168,7 +171,7 @@ fn capture_image(
             .unwrap_or(1)
             != 1
     {
-        return Err("TIFF pyramid levels must be single-sample uint16 grayscale; refusing to drop unsupported SubIFD pixels".into());
+        return Err("TIFF pyramid levels must be single-sample uint8 or uint16 grayscale; refusing to drop unsupported SubIFD pixels".into());
     }
     let flags = dec
         .find_tag(Tag::NewSubfileType)
@@ -178,6 +181,7 @@ fn capture_image(
         .map_err(|e| e.to_string())?
         .unwrap_or(1);
     let mut tags = read_tags(&mut dec.image_ifd(), true, budget)?;
+    save_sample_depth(&mut dec, &mut tags, budget)?;
     resolve_children(&mut dec, &mut tags, depth + 1, budget)?;
     charge(budget, 24)?;
     tags.push(SavedTag {
@@ -232,7 +236,11 @@ impl Image {
             return Err("invalid pyramid image dimensions".into());
         }
         let tags = rd.tags(depth)?;
-        if tags.iter().any(|t| structural(t.id) && t.id != 254) {
+        sample_depth(&tags)?;
+        if tags
+            .iter()
+            .any(|t| structural(t.id) && !matches!(t.id, 254 | 258))
+        {
             return Err("unexpected pixel-storage tags in pyramid metadata".into());
         }
         let len = rd.n()?;
@@ -278,9 +286,13 @@ impl Image {
         let x = u32::try_from(self.x).map_err(|_| "pyramid width exceeds u32")?;
         let y = u32::try_from(self.y).map_err(|_| "pyramid height exceeds u32")?;
         let mut dir = enc.extra_directory().map_err(|e| e.to_string())?;
-        let offset = dir
-            .write_data(pixels.as_slice())
-            .map_err(|e| e.to_string())?;
+        let bits = sample_depth(&self.tags)?;
+        let offset = if bits == 8 {
+            dir.write_data(byte_pixels(&pixels).as_slice())
+        } else {
+            dir.write_data(pixels.as_slice())
+        }
+        .map_err(|e| e.to_string())?;
         macro_rules! tag {
             ($tag:ident, $value:expr) => {
                 dir.write_tag(Tag::$tag, $value)
@@ -289,7 +301,7 @@ impl Image {
         }
         tag!(ImageWidth, x);
         tag!(ImageLength, y);
-        tag!(BitsPerSample, 16u16);
+        tag!(BitsPerSample, bits);
         tag!(Compression, 1u16);
         tag!(PhotometricInterpretation, 1u16);
         tag!(SamplesPerPixel, 1u16);
@@ -301,7 +313,7 @@ impl Image {
             tag!(StripOffsets, offset);
         }
         let bytes = (pixels.len() as u64)
-            .checked_mul(2)
+            .checked_mul(u64::from(bits / 8))
             .ok_or("pyramid strip size overflow")?;
         if let Ok(bytes) = u32::try_from(bytes) {
             tag!(StripByteCounts, bytes);
@@ -309,6 +321,9 @@ impl Image {
             tag!(StripByteCounts, bytes);
         }
         for tag in &tags {
+            if tag.id == 258 {
+                continue;
+            }
             write_tag(&mut dir, tag)?;
         }
         Ok(dir

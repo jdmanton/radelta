@@ -163,6 +163,8 @@ class Dataset:
                                                        ranges[3], ranges[4])
             order = ["tczyx".index(a) for a in self.axes] + [i for i, a in enumerate("tczyx") if a not in self.axes]
             result = output.transpose(order).reshape(tuple(len(selected[a]) for a in self.axes))
+            if self.dtype.itemsize == 1:
+                np.minimum(result, 255, out=result)
             result = result.astype(self.dtype, copy=False)
             return np.squeeze(result, axis=tuple(squeezed))[()]
 
@@ -208,7 +210,7 @@ def read(path, *, dataset="/images", max_output_bytes=None, cache_mib=None):
 def write(path, array, axes=None, *, lossy=False, offset_adu=None, gain_e_per_adu=None,
           noise_step=2., metadata=b"", memory_mib=256, overwrite=False,
           dataset="/images", chunks=None):
-    """Write uint16 data to .rdlt or HDF5, publishing only completed output.
+    """Write uint8 or uint16 data to .rdlt or HDF5, publishing only completed output.
 
     .rdlt writing streams TCZ planes using native defaults. HDF5 chunks follow
     canonical TCZYX order with leading singleton axes omitted. Existing files

@@ -27,6 +27,7 @@ final class RadeltaMetadata {
     static byte[] capture(ImagePlus imp) throws IOException {
         Map<String, String> values = new TreeMap<String, String>();
         values.put("title", imp.getTitle());
+        values.put("bitDepth", Integer.toString(imp.getBitDepth()));
         Calibration c = imp.getCalibration();
         double[] numbers = {
             c.pixelWidth,
@@ -103,6 +104,61 @@ final class RadeltaMetadata {
             writeBytes(out, entry.getValue().getBytes(StandardCharsets.UTF_8));
         }
         return bytes.toByteArray();
+    }
+
+    static int bitDepth(byte[] data) throws IOException {
+        if (starts(data, MAGIC)) {
+            DataInputStream in = new DataInputStream(new ByteArrayInputStream(data, 8, data.length - 8));
+            byte[] original = readBytes(in);
+            int count = in.readInt();
+            if (count < 0 || count > in.available() / 8) throw new IOException("Invalid ImageJ metadata field count");
+            for (int i = 0; i < count; i++) {
+                String key = new String(readBytes(in), StandardCharsets.UTF_8);
+                String value = new String(readBytes(in), StandardCharsets.UTF_8);
+                if (key.equals("bitDepth")) {
+                    if (!value.equals("8") && !value.equals("16")) throw new IOException("Invalid ImageJ bit depth");
+                    return Integer.parseInt(value);
+                }
+            }
+            return bitDepth(original);
+        }
+        if (starts(data, TIFF) || RadeltaPyramids.isPyramid(data)) {
+            try {
+                ByteBuffer in = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+                in.position(9);
+                long pages = in.getLong();
+                if (pages < 1 || pages > in.remaining() / 8) throw new IOException("Invalid TIFF page count");
+                in.position(in.position() + (int) pages * 8);
+                long count = in.getLong();
+                if (count != 1 && count != pages) throw new IOException("Invalid TIFF IFD count");
+                int bits = 0;
+                for (long i = 0; i < count; i++) {
+                    Map<Integer, byte[]> tags = new HashMap<Integer, byte[]>();
+                    readTags(in, tags, 0);
+                    int pageBits = savedBitDepth(tags);
+                    if (bits != 0 && bits != pageBits) throw new IOException("Mixed TIFF bit depths are unsupported");
+                    bits = pageBits;
+                }
+                return bits;
+            } catch (java.nio.BufferUnderflowException | IllegalArgumentException e) {
+                throw new IOException("Invalid TIFF sample depth metadata", e);
+            }
+        }
+        return 16;
+    }
+
+    static int savedBitDepth(Map<Integer, byte[]> tags) throws IOException {
+        byte[] bits = tags.get(258);
+        if (bits == null) return 16;
+        if (bits.length != 2 || bits[0] != 8 || bits[1] != 0) throw new IOException("Invalid saved TIFF bit depth");
+        return 8;
+    }
+
+    static Object imagePixels(short[] pixels, int bitDepth) {
+        if (bitDepth == 16) return pixels;
+        byte[] bytes = new byte[pixels.length];
+        for (int i = 0; i < pixels.length; i++) bytes[i] = (byte) Math.min(255, Short.toUnsignedInt(pixels[i]));
+        return bytes;
     }
 
     static void apply(ImagePlus imp, byte[] data) throws IOException {
@@ -327,7 +383,7 @@ final class RadeltaMetadata {
             long length = in.getLong();
             if (length < 0 || length > in.remaining())
                 throw new IOException("Invalid TIFF metadata value length");
-            if (tags != null && (tag == 270 || tag == 282 || tag == 283 || tag == 296)) {
+            if (tags != null && (tag == 258 || tag == 270 || tag == 282 || tag == 283 || tag == 296)) {
                 byte[] value = new byte[(int) length];
                 in.get(value);
                 tags.put(tag, value);

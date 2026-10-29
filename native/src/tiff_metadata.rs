@@ -143,6 +143,42 @@ fn save_tags(out: &mut Vec<u8>, tags: &[SavedTag]) {
         }
     }
 }
+fn save_sample_depth<R: Read + Seek>(
+    dec: &mut Decoder<R>,
+    tags: &mut Vec<SavedTag>,
+    budget: &mut usize,
+) -> Result<(), String> {
+    if tiff_io::sample_bytes(dec)? == 1 {
+        *budget = budget
+            .checked_sub(22)
+            .ok_or("TIFF metadata exceeds configured byte limit")?;
+        tags.push(SavedTag {
+            id: 258,
+            ty: 3,
+            bytes: 8u16.to_le_bytes().to_vec(),
+            children: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
+fn sample_depth(tags: &[SavedTag]) -> Result<u16, String> {
+    let mut bits = None;
+    for tag in tags.iter().filter(|t| t.id == 258) {
+        if bits.is_some() || tag.ty != 3 || tag.bytes != [8, 0] || !tag.children.is_empty() {
+            return Err("invalid saved TIFF sample depth".into());
+        }
+        bits = Some(8);
+    }
+    Ok(bits.unwrap_or(16))
+}
+
+/// Lossy reconstruction can overshoot the original byte range. Saturate it;
+/// this avoids wrapping highlights to dark values on narrowing.
+fn byte_pixels(pixels: &[u16]) -> Vec<u8> {
+    pixels.iter().map(|&v| v.min(255) as u8).collect()
+}
+
 pub fn capture(path: &Path, layout: &ResolvedLayout) -> Result<Vec<u8>, String> {
     let d = layout.dims;
     d.voxels().map_err(|e| e.to_string())?;
@@ -195,6 +231,7 @@ pub fn capture(path: &Path, layout: &ResolvedLayout) -> Result<Vec<u8>, String> 
         }
         pyramid_images.push(levels);
         let mut tags = read_tags(&mut dec.image_ifd(), true, &mut budget)?;
+        save_sample_depth(&mut dec, &mut tags, &mut budget)?;
         resolve_children(&mut dec, &mut tags, 0, &mut budget)?;
         if samples > 1 {
             // Each planar sample becomes its own single-sample page. Drop the
@@ -323,7 +360,9 @@ impl TiffMetadata {
         }
         let mut tags = Vec::new();
         for _ in 0..count {
-            tags.push(rd.tags(0)?);
+            let page_tags = rd.tags(0)?;
+            sample_depth(&page_tags)?;
+            tags.push(page_tags);
         }
         let mut pyramids = Vec::new();
         if has_pyramids {
@@ -353,7 +392,17 @@ impl TiffMetadata {
         }))
     }
     fn page_tags(&self, page: usize) -> &[SavedTag] {
-        self.tags.get(page).map(Vec::as_slice).unwrap_or(&[])
+        self.tags
+            .get(if self.tags.len() == 1 { 0 } else { page })
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+    fn bits(&self) -> Result<u16, String> {
+        let first = sample_depth(self.page_tags(0))?;
+        if self.tags.iter().any(|tags| sample_depth(tags) != Ok(first)) {
+            return Err("mixed TIFF sample depths in one dense dataset are unsupported".into());
+        }
+        Ok(first)
     }
     pub fn has_description(&self) -> bool {
         self.tags[0].iter().any(|t| t.id == 270)
@@ -681,6 +730,9 @@ pub fn write(
     d.voxels().map_err(|e| e.to_string())?;
     let saved = TiffMetadata::parse(metadata, d)?;
     let mapping = page_mapping(d, order, saved.as_ref())?;
+    if let Some(m) = &saved {
+        m.bits()?;
+    }
     let preserve = saved
         .as_ref()
         .is_some_and(|m| m.layout_valid && m.mapping == mapping);
@@ -744,9 +796,10 @@ fn write_imagej_prefix<W: Write + Seek>(
 ) -> Result<u64, String> {
     let width = u32::try_from(d.x).map_err(|_| "TIFF width exceeds u32")?;
     let height = u32::try_from(d.y).map_err(|_| "TIFF height exceeds u32")?;
+    let bits = m.bits()?;
     let plane_bytes =
         d.x.checked_mul(d.y)
-            .and_then(|n| n.checked_mul(2))
+            .and_then(|n| n.checked_mul(usize::from(bits / 8)))
             .and_then(|n| u32::try_from(n).ok())
             .ok_or("ImageJ TIFF plane must be smaller than 4 GiB")?;
     {
@@ -767,7 +820,7 @@ fn write_imagej_prefix<W: Write + Seek>(
             }
             tag!(ImageWidth, width);
             tag!(ImageLength, height);
-            tag!(BitsPerSample, 16u16);
+            tag!(BitsPerSample, bits);
             tag!(Compression, 1u16);
             tag!(PhotometricInterpretation, 1u16);
             tag!(StripOffsets, offset);
@@ -824,7 +877,7 @@ impl Seek for PrefixSize {
 
 fn imagej_header_plan(d: Dims5, m: &TiffMetadata, pages: usize) -> Result<(usize, u64), String> {
     let data_bytes = (d.voxels().map_err(|e| e.to_string())? as u64)
-        .checked_mul(2)
+        .checked_mul(u64::from(m.bits()? / 8))
         .ok_or("TIFF size overflow")?;
     // Offset values have fixed TIFF types, so substituting their final values
     // does not change the prefix size. Beyond classic TIFF's address space,
@@ -877,6 +930,7 @@ fn write_imagej_layout(
     } else if write_imagej_prefix(&mut out, d, m, ifds, data_start)? != data_start {
         return Err("ImageJ TIFF prefix size changed while resolving strip offsets".into());
     }
+    let bits = m.bits()?;
     for &canonical in mapping {
         let plane = read.plane(canonical)?;
         if plane.len() != plane_len {
@@ -884,8 +938,13 @@ fn write_imagej_layout(
         }
         // TiffEncoder writes a native-endian header; the initialized u16
         // storage has the same byte order and needs no per-pixel conversion.
-        out.write_all(tiff_io::u16_bytes(plane))
-            .map_err(|e| e.to_string())?;
+        if bits == 8 {
+            out.write_all(&byte_pixels(plane))
+                .map_err(|e| e.to_string())?;
+        } else {
+            out.write_all(tiff_io::u16_bytes(plane))
+                .map_err(|e| e.to_string())?;
+        }
     }
     out.flush().map_err(|e| e.to_string())
 }
@@ -911,7 +970,11 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
     // Fail with an error rather than aborting if a damaged header slipped
     // past validation and still describes an impossible plane.
     let plane_len = d.x.checked_mul(d.y).ok_or("plane size overflow")?;
+    let bits = saved.map(TiffMetadata::bits).transpose()?.unwrap_or(16);
     let mut generated = ome_description(d, order.unwrap_or("TCZ"));
+    if bits == 8 {
+        generated = generated.replace("Type=\"uint16\"", "Type=\"uint8\"");
+    }
     let described_order = order.unwrap_or("TCZ");
     let regular = mapping.iter().enumerate().all(|(p, &canonical)| {
         let (t, c, z) = coords_from_page_index(p, described_order, d);
@@ -948,36 +1011,45 @@ fn write_pages<W: Write + Seek, K: TiffKind>(
                 pyramids::append_pointer(enc, images, &mut tags)?;
             }
         }
-        let mut image = enc
-            .new_image::<colortype::Gray16>(d.x as u32, d.y as u32)
-            .map_err(|e| e.to_string())?;
-        // Output is uncompressed and already held in a plane buffer. One
-        // strip per plane avoids repeated strip dispatch and offset tables.
-        image
-            .rows_per_strip(d.y as u32)
-            .map_err(|e| e.to_string())?;
-        for tag in &tags {
-            if (!structural(tag.id) || tag.id == 330) && (tag.id != 270 || preserve) {
-                write_tag(image.encoder(), tag)?;
-            }
-        }
-        if page == 0 {
-            if !preserve || !saved.is_some_and(|m| m.has_description()) {
-                image
-                    .encoder()
-                    .write_tag(Tag::ImageDescription, generated.as_str())
+        macro_rules! write_plane {
+            ($color:ty, $pixels:expr) => {{
+                let mut image = enc
+                    .new_image::<$color>(d.x as u32, d.y as u32)
                     .map_err(|e| e.to_string())?;
-            }
-            // Preserve opaque non-TIFF metadata, or the original descriptions
-            // when the caller deliberately changes the logical/page layout.
-            if !metadata.is_empty() && !preserve {
+                // Output is uncompressed and already held in a plane buffer. One
+                // strip per plane avoids repeated strip dispatch and offset tables.
                 image
-                    .encoder()
-                    .write_tag(Tag::from_u16_exhaustive(ARCHIVE_TAG), metadata)
+                    .rows_per_strip(d.y as u32)
                     .map_err(|e| e.to_string())?;
-            }
+                for tag in &tags {
+                    if (!structural(tag.id) || tag.id == 330) && (tag.id != 270 || preserve) {
+                        write_tag(image.encoder(), tag)?;
+                    }
+                }
+                if page == 0 {
+                    if !preserve || !saved.is_some_and(|m| m.has_description()) {
+                        image
+                            .encoder()
+                            .write_tag(Tag::ImageDescription, generated.as_str())
+                            .map_err(|e| e.to_string())?;
+                    }
+                    // Preserve opaque non-TIFF metadata, or the original descriptions
+                    // when the caller deliberately changes the logical/page layout.
+                    if !metadata.is_empty() && !preserve {
+                        image
+                            .encoder()
+                            .write_tag(Tag::from_u16_exhaustive(ARCHIVE_TAG), metadata)
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                image.write_data($pixels).map_err(|e| e.to_string())?;
+            }};
         }
-        image.write_data(plane).map_err(|e| e.to_string())?;
+        if bits == 8 {
+            write_plane!(colortype::Gray8, &byte_pixels(plane));
+        } else {
+            write_plane!(colortype::Gray16, plane);
+        }
     }
     Ok(())
 }

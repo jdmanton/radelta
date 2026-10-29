@@ -10,6 +10,18 @@ import radelta_hdf5
 
 
 class EmbeddedTests(unittest.TestCase):
+    def test_uint8_lossless_and_lossy(self):
+        image = np.arange(512, dtype=np.uint16).astype(np.uint8).reshape(2, 16, 16)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bytes.h5"
+            for lossy in (False, True):
+                with h5py.File(path, "w") as f:
+                    radelta_hdf5.create_dataset(f, "data", data=image, chunks=(1, 7, 9), lossy=lossy)
+                expected = np.minimum(np.floor(np.sqrt(image.astype(float))+.5)**2, 255).astype(np.uint8) if lossy else image
+                with h5py.File(path) as f:
+                    self.assertEqual(f["data"].dtype, np.uint8)
+                    np.testing.assert_array_equal(f["data"][:], expected)
+
     def test_raw_fallback_retains_filter_and_pixel_semantics(self):
         rng = np.random.default_rng(78)
         with tempfile.TemporaryDirectory() as d:

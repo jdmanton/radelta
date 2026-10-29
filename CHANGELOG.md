@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0
+
+- Add unsigned 8-bit TIFF support to in-memory and streaming encoding, including
+  planar channels, contiguous ImageJ stacks and TIFF pyramid SubIFDs; decoding
+  restores the original sample depth and plane mapping;
+- Preserve uint8 arrays through the Python array and file APIs, Zarr v2/v3
+  codecs, OME-Zarr pyramids and HDF5 datasets; HDF5 byte datasets append a sample
+  width parameter while existing uint16 parameters remain unchanged;
+- Restore 8-bit stacks in Fiji when opening virtual stacks or loading into RAM,
+  including the sample depth of stored pyramid resolutions;
+- Saturate lossy 8-bit reconstructions at 255 instead of wrapping highlights;
+- Fix padded 8-bit LZW tile reads and report TIFF compression rates and ratios
+  using the original input sample width;
+- Reuse the existing pixel codec and C ABI, preserving uint16 stream encoding.
+
 ## 0.8.9
 
 - ImageJ opens stored TIFF pyramid resolutions as virtual or RAM-loaded

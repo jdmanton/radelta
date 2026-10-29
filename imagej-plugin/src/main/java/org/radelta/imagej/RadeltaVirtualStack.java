@@ -3,6 +3,7 @@ package org.radelta.imagej;
 import ij.VirtualStack;
 import ij.process.ImageProcessor;
 import ij.process.ShortProcessor;
+import ij.process.ByteProcessor;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -18,7 +19,7 @@ final class RadeltaVirtualStack extends VirtualStack {
         super(file.width, file.height, file.planeCount());
         this.file = file;
         this.size = file.planeCount();
-        setBitDepth(16);
+        setBitDepth(file.bitDepth);
     }
 
     RadeltaFile getRadeltaFile() {
@@ -32,7 +33,7 @@ final class RadeltaVirtualStack extends VirtualStack {
 
     @Override
     public int getBitDepth() {
-        return 16;
+        return file.bitDepth;
     }
 
     @Override
@@ -45,7 +46,9 @@ final class RadeltaVirtualStack extends VirtualStack {
         int t = i / (file.channels * file.slices);
         try {
             short[] pixels = file.readPlane(t, c, z);
-            ShortProcessor ip = new ShortProcessor(file.width, file.height, pixels, null);
+            ImageProcessor ip = file.bitDepth == 8
+                    ? new ByteProcessor(file.width, file.height, (byte[]) RadeltaMetadata.imagePixels(pixels, 8), null)
+                    : new ShortProcessor(file.width, file.height, pixels, null);
             ip.setSliceNumber(n);
             return ip;
         } catch (IOException e) {

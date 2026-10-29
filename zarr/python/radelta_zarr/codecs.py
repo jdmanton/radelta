@@ -6,7 +6,7 @@ import numpy as np
 from numcodecs.abc import Codec
 from zarr.abc.codec import ArrayBytesCodec
 
-from ._native import (CODEC_ID, decode_chunk, encode_chunk, uint16_dtype,
+from ._native import (CODEC_ID, decode_chunk, encode_chunk, unsigned_dtype,
                       validate_axes, validate_options, validate_shape)
 
 
@@ -35,7 +35,7 @@ class RadeltaCodec(ArrayBytesCodec):
 
     def validate(self, *, shape, dtype, chunk_grid):
         validate_axes(self.axes, len(shape))
-        uint16_dtype(dtype.to_native_dtype())
+        unsigned_dtype(dtype.to_native_dtype())
 
     def compute_encoded_size(self, input_byte_length, chunk_spec):
         raise NotImplementedError("Radelta compressed chunks have variable sizes")
@@ -60,7 +60,7 @@ class RadeltaNumcodec(Codec):
             raise ValueError("Unsupported Radelta Zarr codec configuration version")
         self.chunk_shape = validate_shape(chunk_shape)
         self.axes = validate_axes(axes, len(self.chunk_shape))
-        self.dtype = uint16_dtype(dtype).str
+        self.dtype = unsigned_dtype(dtype).str
         if order not in {"C", "F"}:
             raise ValueError("order must be C or F")
         self.order, self.options = order, validate_options(options)
@@ -74,7 +74,7 @@ class RadeltaNumcodec(Codec):
             raw = buf.tobytes(order=self.order)
         else:
             raw = bytes(buf)
-        if len(raw) != np.prod(self.chunk_shape, dtype=np.int64)*2:
+        if len(raw) != np.prod(self.chunk_shape, dtype=np.int64)*np.dtype(self.dtype).itemsize:
             raise ValueError("Input byte count does not match Radelta chunk shape")
         data = np.frombuffer(raw, dtype=self.dtype).reshape(self.chunk_shape, order=self.order)
         return encode_chunk(data, self.axes, self.options)

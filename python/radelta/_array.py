@@ -11,7 +11,7 @@ from ._native import Options, LossyOptions, U8, bytes_buffer, library, metadata_
 
 def compress(array, axes=None, *, lossy=False, offset_adu=None, gain_e_per_adu=None,
              noise_step=2., block_depth=4, context="mean", scale_bits=10, metadata=b""):
-    """Return standard Radelta bytes, preserving uint16 shape, axes and byte order.
+    """Return standard Radelta bytes, preserving uint8/uint16 shape, axes and byte order.
 
     Arrays may be non-contiguous. Axes default to YX/ZYX/CZYX/TCZYX by rank.
     Lossy mode requires explicit camera offset and gain in electrons/ADU.
@@ -51,7 +51,7 @@ def compress(array, axes=None, *, lossy=False, offset_adu=None, gain_e_per_adu=N
 
 
 def decompress(encoded, *, max_output_bytes=None):
-    """Decode standard Radelta bytes to a uint16 array.
+    """Decode standard Radelta bytes to a uint8 or uint16 array.
 
     Python-produced streams restore their exact shape, axis order and dtype.
     Other streams use canonical TCZYX order with leading singleton T/C/Z axes
@@ -81,4 +81,6 @@ def decompress(encoded, *, max_output_bytes=None):
     if status != 0:
         raise ValueError("Corrupt Radelta stream")
     order = ["tczyx".index(a) for a in axes] + [i for i, a in enumerate("tczyx") if a not in axes]
+    if dtype.itemsize == 1:
+        np.minimum(output, 255, out=output)
     return output.transpose(order).reshape(shape).astype(dtype, copy=False)

@@ -12,6 +12,7 @@
 #endif
 #define OPTIONS_COUNT 11
 #define LOCAL_COUNT 17
+#define BYTE_LOCAL_COUNT 18
 #define PARAM_VERSION 1
 
 /* Fiji/JHDF5 embeds its own HDF5 library, so the embedded build makes no HDF5
@@ -35,7 +36,9 @@
 /* cd_values: version, lossy, block depth, context, scale bits,
  * offset/gain/noise as low/high uint32 pairs, X,Y,Z,C,T, byte order (0 LE/1 BE).
  * The SDK filter derives the last six words in set_local and never trusts the
- * caller's values. The embedded filter takes them from the dataset creator. */
+ * caller's values. Optional word 18 is sample width (1 for uint8); the
+ * original 17-word parameters always mean uint16. The embedded filter takes
+ * local parameters from the dataset creator. */
 static double unpack_double(const unsigned *p) {
     uint64_t bits = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
     double value;
@@ -63,22 +66,23 @@ static htri_t can_apply(hid_t dcpl, hid_t type, hid_t space) {
         H5Pget_filter2(dcpl, 0, &flags, &count, NULL, 0, NULL, NULL) !=
             RADELTA_HDF5_FILTER_ID) return -1;
     return rank >= 2 && rank <= 5 && H5Tget_class(type) == H5T_INTEGER &&
-        H5Tget_size(type) == 2 && H5Tget_precision(type) == 16 &&
+        (H5Tget_size(type) == 1 || H5Tget_size(type) == 2) &&
+        H5Tget_precision(type) == 8 * H5Tget_size(type) &&
         H5Tget_offset(type) == 0 && H5Tget_sign(type) == H5T_SGN_NONE &&
         (order == H5T_ORDER_LE || order == H5T_ORDER_BE) ? 1 : -1;
 }
 
 static herr_t set_local(hid_t dcpl, hid_t type, hid_t space) {
-    unsigned p[LOCAL_COUNT] = {1, 0, 4, 2, 10};
+    unsigned p[BYTE_LOCAL_COUNT] = {1, 0, 4, 2, 10};
     unsigned flags = 0;
-    size_t count = LOCAL_COUNT;
+    size_t count = BYTE_LOCAL_COUNT;
     hsize_t chunks[5];
     int rank, i;
     size_t voxels = 1;
     (void)space;
     if (H5Pget_filter_by_id2(dcpl, RADELTA_HDF5_FILTER_ID, &flags,
             &count, p, 0, NULL, NULL) < 0 ||
-        (count != 0 && count != OPTIONS_COUNT && count != LOCAL_COUNT)) return -1;
+        (count != 0 && count != OPTIONS_COUNT && count != LOCAL_COUNT && count != BYTE_LOCAL_COUNT)) return -1;
     if (count == 0) {
         const unsigned defaults[OPTIONS_COUNT] = {1, 0, 4, 2, 10};
         memcpy(p, defaults, sizeof(defaults));
@@ -94,10 +98,11 @@ static herr_t set_local(hid_t dcpl, hid_t type, hid_t space) {
         voxels *= (size_t)n;
     }
     p[16] = H5Tget_order(type) == H5T_ORDER_BE;
+    p[17] = (unsigned)H5Tget_size(type);
     /* Make failures visible, including with h5py's optional custom filters.
      * A lossy encode must never silently skip quantisation. */
     return H5Pmodify_filter(dcpl, RADELTA_HDF5_FILTER_ID,
-        flags & ~H5Z_FLAG_OPTIONAL, LOCAL_COUNT, p);
+        flags & ~H5Z_FLAG_OPTIONAL, p[17] == 1 ? BYTE_LOCAL_COUNT : LOCAL_COUNT, p);
 }
 #endif
 
@@ -124,13 +129,15 @@ static size_t filter(unsigned flags, size_t count, const unsigned p[],
     uint8_t *encoded = NULL;
     void *result = NULL;
     int32_t status;
-    if (count != LOCAL_COUNT || !valid_options(p) || p[16] > 1 ||
+    size_t sample_bytes = count == BYTE_LOCAL_COUNT ? p[17] : 2;
+    if ((count != LOCAL_COUNT && count != BYTE_LOCAL_COUNT) ||
+        (sample_bytes != 1 && sample_bytes != 2) || !valid_options(p) || p[16] > 1 ||
         !capacity || !buffer || !*buffer || nbytes > *capacity) return 0;
     for (i = 11; i < 16; ++i) {
         if (!p[i] || p[i] > SIZE_MAX / 2 / voxels) return 0;
         voxels *= p[i];
     }
-    bytes = voxels * 2;
+    bytes = voxels * sample_bytes;
     if (flags & H5Z_FLAG_REVERSE) {
         size_t needed = 0;
         if (nbytes < 4 || (p[1] ?
@@ -143,23 +150,28 @@ static size_t filter(unsigned flags, size_t count, const unsigned p[],
             &needed, &x, &y, &z, &c, &t);
         if (status != RADELTA_BUFFER_TOO_SMALL || needed != voxels ||
             x != p[11] || y != p[12] || z != p[13] || c != p[14] || t != p[15]) return 0;
-        pixels = FILTER_ALLOC(bytes);
+        pixels = FILTER_ALLOC(voxels * sizeof(uint16_t));
         if (!pixels) return 0;
         status = radelta_decompress_u16_nd(*buffer, nbytes, pixels, voxels,
             &needed, &x, &y, &z, &c, &t);
         if (status != RADELTA_OK) goto failure;
         result = FILTER_ALLOC(bytes);
         if (!result) goto failure;
-        encode_pixels(pixels, result, voxels, p[16]);
+        if (sample_bytes == 1) {
+            for (i = 0; i < voxels; ++i) ((uint8_t *)result)[i] =
+                (uint8_t)(pixels[i] > 255 ? 255 : pixels[i]);
+        } else encode_pixels(pixels, result, voxels, p[16]);
         result_size = bytes;
     } else {
         radelta_options opts = {p[2], p[3], p[4]};
         radelta_lossy_options lossy = {p[2], p[3], p[4],
             unpack_double(p+5), unpack_double(p+7), unpack_double(p+9)};
         if (nbytes != bytes) return 0;
-        pixels = FILTER_ALLOC(bytes);
+        pixels = FILTER_ALLOC(voxels * sizeof(uint16_t));
         if (!pixels) return 0;
-        decode_pixels(*buffer, pixels, voxels, p[16]);
+        if (sample_bytes == 1) {
+            for (i = 0; i < voxels; ++i) pixels[i] = ((const uint8_t *)*buffer)[i];
+        } else decode_pixels(*buffer, pixels, voxels, p[16]);
         status = radelta_compress_u16_nd_alloc(pixels, voxels,
             p[11], p[12], p[13], p[14], p[15],
             p[1] ? NULL : &opts, p[1] ? &lossy : NULL, &encoded, &result_size);
@@ -185,10 +197,10 @@ static const H5Z_class2_t cls = {
 #ifdef RADELTA_HDF5_EMBEDDED
     /* The ImageJ plugin identifies this build by the ", embedded)" suffix. */
     H5Z_CLASS_T_VERS, RADELTA_HDF5_FILTER_ID, 1, 1,
-    "Radelta 0.8.9 (uint16 TCZYX, embedded)", NULL, NULL, filter
+    "Radelta 0.9.0 (uint8/uint16 TCZYX, embedded)", NULL, NULL, filter
 #else
     H5Z_CLASS_T_VERS, RADELTA_HDF5_FILTER_ID, 1, 1,
-    "Radelta 0.8.9 (uint16 TCZYX)", can_apply, set_local, filter
+    "Radelta 0.9.0 (uint8/uint16 TCZYX)", can_apply, set_local, filter
 #endif
 };
 H5PL_type_t H5PLget_plugin_type(void) { return H5PL_TYPE_FILTER; }

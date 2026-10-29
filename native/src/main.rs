@@ -101,7 +101,7 @@ fn usage() -> ! {
            q         = round(z / noise_step)\n\n\
          Notes:\n  \\
          * X and Y may be rectangular; all pages in one dense TIFF dataset must share X/Y.\n  \\
-         * The CLI expects uint16 pages. Planar multi-sample pages are read as channels; interleaved RGB is rejected.\n  \\
+         * The CLI expects uint8 or uint16 pages. Planar multi-sample pages are read as channels; interleaved RGB is rejected.\n  \\
          * Multi-file OME-TIFF datasets are not yet assembled automatically.\n  \\
          * Single volumes use RDL1/RDLQ; multidimensional files use RDM2/RDQ2."
     );
@@ -371,7 +371,7 @@ fn read_imagej_contiguous_u16(
     // ImageJ/tifffile hyperstacks may store all pixels contiguously after the
     // first IFD and omit IFDs for the remaining logical planes.  This reader
     // intentionally supports only the safe/simple case used for such stacks:
-    // uncompressed, single-sample, 16-bit grayscale data whose strips for the
+    // uncompressed, single-sample, 8-bit or 16-bit grayscale data whose strips for the
     // first plane are themselves contiguous.
     let compression = dec.get_tag_u64(Tag::Compression).unwrap_or(1);
     if compression != 1 {
@@ -383,9 +383,9 @@ fn read_imagej_contiguous_u16(
     let bits = dec
         .get_tag_u16_vec(Tag::BitsPerSample)
         .map_err(|e| e.to_string())?;
-    if bits.as_slice() != [16] {
+    if !matches!(bits.as_slice(), [8] | [16]) {
         return Err(format!(
-            "contiguous ImageJ stack must be 16-bit grayscale; BitsPerSample={bits:?}"
+            "contiguous ImageJ stack must be 8-bit or 16-bit grayscale; BitsPerSample={bits:?}"
         ));
     }
     let samples = dec.get_tag_u64(Tag::SamplesPerPixel).unwrap_or(1);
@@ -412,11 +412,12 @@ fn read_imagej_contiguous_u16(
         return Err("invalid StripOffsets/StripByteCounts in contiguous ImageJ TIFF".into());
     }
 
+    let sample_bytes = tiff_io::sample_bytes(dec)?;
     let plane_samples = width
         .checked_mul(height)
         .ok_or("TIFF plane size overflow")?;
     let plane_bytes = plane_samples
-        .checked_mul(2)
+        .checked_mul(sample_bytes)
         .ok_or("TIFF plane byte size overflow")?;
     let first_plane_bytes: u64 = counts
         .iter()
@@ -424,7 +425,7 @@ fn read_imagej_contiguous_u16(
         .map_err(|_| "TIFF strip-byte-count overflow")?;
     if first_plane_bytes != plane_bytes as u64 {
         return Err(format!(
-            "contiguous ImageJ TIFF first IFD describes {first_plane_bytes} bytes of pixel data, expected {plane_bytes} for one {width}x{height} uint16 plane"
+            "contiguous ImageJ TIFF first IFD describes {first_plane_bytes} bytes of pixel data, expected {plane_bytes} for one {width}x{height} plane"
         ));
     }
     for i in 1..offsets.len() {
@@ -443,7 +444,7 @@ fn read_imagej_contiguous_u16(
         .checked_mul(logical_pages)
         .ok_or("ImageJ logical stack size overflow")?;
     let total_bytes = total_samples
-        .checked_mul(2)
+        .checked_mul(sample_bytes)
         .ok_or("ImageJ logical stack byte size overflow")?;
     let data_offset = offsets[0];
 
@@ -463,7 +464,7 @@ fn read_imagej_contiguous_u16(
         .map_err(|e| e.to_string())?;
 
     let mut out = vec![0u16; total_samples];
-    tiff_io::read_u16(reader, &mut out, byte_order)?;
+    tiff_io::read_unsigned(reader, &mut out, sample_bytes, byte_order)?;
     Ok(out)
 }
 
@@ -513,6 +514,9 @@ fn read_sample_plane_into(
     if tiff_io::read_raw_sample_plane(dec, plane, sample)? {
         return Ok(());
     }
+    if tiff_io::read_u8_tiled_sample(dec, plane, sample)? {
+        return Ok(());
+    }
     let chunk_type = dec.get_chunk_type();
     let chunks = match chunk_type {
         ChunkType::Strip => dec.strip_count(),
@@ -534,7 +538,9 @@ fn read_sample_plane_into(
         ChunkType::Strip => 1,
         ChunkType::Tile => width.div_ceil(chunk_w),
     };
+    let sample_bytes = tiff_io::sample_bytes(dec)?;
     let mut scratch = Vec::<u16>::new();
+    let mut byte_scratch = Vec::<u8>::new();
     for k in 0..per_plane {
         let index = sample
             .checked_mul(per_plane)
@@ -557,12 +563,31 @@ fn read_sample_plane_into(
         let layout = dec
             .image_chunk_buffer_layout(index)
             .map_err(|e| e.to_string())?;
-        if !matches!(layout.sample_type, Some(DecodingSampleType::U16))
-            || read_w.checked_mul(read_h).and_then(|n| n.checked_mul(2)) != Some(layout.len)
+        if !matches!(
+            layout.sample_type,
+            Some(DecodingSampleType::U8 | DecodingSampleType::U16)
+        ) || read_w
+            .checked_mul(read_h)
+            .and_then(|n| n.checked_mul(sample_bytes))
+            != Some(layout.len)
         {
-            return Err("expected uint16 samples in planar multisample TIFF page".into());
+            return Err("expected uint8 or uint16 samples in planar multisample TIFF page".into());
         }
-        if x0 == 0 && data_w == width && read_w == width && read_h == data_h {
+        if sample_bytes == 1 {
+            byte_scratch.resize(layout.len, 0);
+            dec.read_chunk_bytes(index, &mut byte_scratch)
+                .map_err(|e| e.to_string())?;
+            for row in 0..data_h {
+                let src = row * read_w;
+                let dst = (y0 + row) * width + x0;
+                for (out, &value) in plane[dst..dst + data_w]
+                    .iter_mut()
+                    .zip(&byte_scratch[src..src + data_w])
+                {
+                    *out = u16::from(value);
+                }
+            }
+        } else if x0 == 0 && data_w == width && read_w == width && read_h == data_h {
             let dst = &mut plane[y0 * width..(y0 + data_h) * width];
             dec.read_chunk_bytes(index, tiff_io::u16_bytes_mut(dst))
                 .map_err(|e| e.to_string())?;
@@ -868,6 +893,7 @@ struct StreamingDataset {
     /// Planar samples per TIFF page; logical plane `p` is sample
     /// `p % samples` of page `p / samples`.
     samples: usize,
+    sample_bytes: usize,
     description: Option<String>,
 }
 
@@ -885,6 +911,7 @@ enum PlaneReader {
         byte_order: tiff::tags::ByteOrder,
         plane_samples: usize,
         plane_bytes: usize,
+        sample_bytes: usize,
         logical_pages: usize,
     },
 }
@@ -911,9 +938,9 @@ impl PlaneReader {
                 let bits = dec
                     .get_tag_u16_vec(Tag::BitsPerSample)
                     .map_err(|e| e.to_string())?;
-                if bits.as_slice() != [16] {
+                if !matches!(bits.as_slice(), [8] | [16]) {
                     return Err(format!(
-                        "contiguous ImageJ stack must be uint16 grayscale; BitsPerSample={bits:?}"
+                        "contiguous ImageJ stack must be uint8 or uint16 grayscale; BitsPerSample={bits:?}"
                     ));
                 }
                 let samples = dec.get_tag_u64(Tag::SamplesPerPixel).unwrap_or(1);
@@ -943,9 +970,10 @@ impl PlaneReader {
                         );
                     }
                 }
+                let sample_bytes = tiff_io::sample_bytes(&mut dec)?;
                 let plane_samples = d.x.checked_mul(d.y).ok_or("TIFF plane size overflow")?;
                 let plane_bytes = plane_samples
-                    .checked_mul(2)
+                    .checked_mul(sample_bytes)
                     .ok_or("TIFF plane byte size overflow")?;
                 let first_bytes: u64 = counts
                     .iter()
@@ -966,6 +994,7 @@ impl PlaneReader {
                     byte_order,
                     plane_samples,
                     plane_bytes,
+                    sample_bytes,
                     logical_pages: info.logical_pages,
                 });
             }
@@ -1015,6 +1044,7 @@ impl PlaneReader {
                 byte_order,
                 plane_samples,
                 plane_bytes,
+                sample_bytes,
                 logical_pages,
             } => {
                 if source_page >= *logical_pages {
@@ -1033,7 +1063,7 @@ impl PlaneReader {
                 if out.len() != *plane_samples {
                     return Err("TIFF plane size mismatch".into());
                 }
-                tiff_io::read_u16(reader, out, *byte_order)
+                tiff_io::read_unsigned(reader, out, *sample_bytes, *byte_order)
             }
         }
     }
@@ -1049,6 +1079,7 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
     let y = h as usize;
     let description = dec.get_tag_ascii_string(Tag::ImageDescription).ok();
     let samples = page_samples(&mut dec)?;
+    let sample_bytes = tiff_io::sample_bytes(&mut dec)?;
 
     let mut physical_pages = 1usize;
     let scan_start = Instant::now();
@@ -1060,6 +1091,9 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
             return Err(
                 "all TIFF pages in one dense dataset must have the same X/Y dimensions".into(),
             );
+        }
+        if tiff_io::sample_bytes(&mut dec)? != sample_bytes {
+            return Err("mixed TIFF sample depths in one dense dataset are unsupported".into());
         }
         let page_sample_count = page_samples(&mut dec)?;
         if page_sample_count != samples {
@@ -1147,6 +1181,7 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
         logical_pages,
         samples,
         description,
+        sample_bytes,
     })
 }
 
@@ -1218,7 +1253,7 @@ fn encode_streaming(
             let elapsed = start.elapsed().as_secs_f64();
             println!("  chunk {}/{} ({:.1}%)  raw {:.3} GiB  elapsed {:.1} s  {:.3} GB/s including TIFF I/O",
                 writer.chunks_written(),chunk_count,100.*writer.chunks_written() as f64/chunk_count as f64,
-                writer.raw_bytes_written() as f64/(1024.*1024.*1024.),elapsed,gb_per_s(writer.raw_bytes_written(),elapsed));
+                (writer.raw_bytes_written() / 2 * info.sample_bytes) as f64/(1024.*1024.*1024.),elapsed,gb_per_s(writer.raw_bytes_written() / 2 * info.sample_bytes,elapsed));
             std::io::stdout().flush().map_err(|e| e.to_string())?;
             last_progress = Instant::now();
         }
@@ -1292,11 +1327,11 @@ fn encode_streaming(
     println!("Payload bytes:    {:.3} MiB", mib(writer.payload_bytes()));
     println!(
         "Compression ratio:{:.2}:1",
-        writer.raw_bytes_written() as f64 / total.max(1) as f64
+        (writer.raw_bytes_written() / 2 * info.sample_bytes) as f64 / total.max(1) as f64
     );
     println!(
         "Encode rate:      {:.3} GB/s (TIFF I/O included)",
-        gb_per_s(writer.raw_bytes_written(), secs)
+        gb_per_s(writer.raw_bytes_written() / 2 * info.sample_bytes, secs)
     );
     Ok(())
 }
@@ -1439,6 +1474,7 @@ fn benchmark(path: &Path, opts: Options, ds: DatasetArgs, repeats: usize) -> Res
     let io0 = Instant::now();
     let (data, layout) = load_dataset(path, &ds)?;
     let dims = layout.dims;
+    let raw_bytes = data.len() * inspect_streaming_dataset(path, &ds)?.sample_bytes;
     println!("Input:           {}", path.display());
     println!("Codec options:   {opts:?}");
     println!(
@@ -1446,7 +1482,7 @@ fn benchmark(path: &Path, opts: Options, ds: DatasetArgs, repeats: usize) -> Res
         rayon::current_num_threads()
     );
     print_shape(&layout);
-    println!("Raw bytes:       {:.3} MiB", mib(data.len() * 2));
+    println!("Raw bytes:       {:.3} MiB", mib(raw_bytes));
     println!("TIFF read/map:   {:.3} s", io0.elapsed().as_secs_f64());
     println!();
 
@@ -1464,12 +1500,12 @@ fn benchmark(path: &Path, opts: Options, ds: DatasetArgs, repeats: usize) -> Res
     println!("  total file:    {:.3} MiB", mib(stats.total_bytes));
     println!(
         "  ratio:         {:.2}:1",
-        stats.raw_bytes as f64 / stats.total_bytes as f64
+        raw_bytes as f64 / stats.total_bytes as f64
     );
     println!("  encode time:   {:.4} s", encode_time);
     println!(
         "  encode rate:   {:.3} GB/s",
-        gb_per_s(stats.raw_bytes, encode_time)
+        gb_per_s(raw_bytes, encode_time)
     );
 
     let mut decoded = vec![0u16; data.len()];
@@ -1482,10 +1518,7 @@ fn benchmark(path: &Path, opts: Options, ds: DatasetArgs, repeats: usize) -> Res
     println!();
     println!("Decompression:");
     println!("  decode time:   {:.4} s", ds_time);
-    println!(
-        "  decode rate:   {:.3} GB/s",
-        gb_per_s(stats.raw_bytes, ds_time)
-    );
+    println!("  decode rate:   {:.3} GB/s", gb_per_s(raw_bytes, ds_time));
     println!("  exact:         yes");
     Ok(())
 }
@@ -1518,6 +1551,7 @@ fn benchmark_lossy(
     let io0 = Instant::now();
     let (data, layout) = load_dataset(path, &ds)?;
     let dims = layout.dims;
+    let raw_bytes = data.len() * inspect_streaming_dataset(path, &ds)?.sample_bytes;
     println!("Input:           {}", path.display());
     println!("Codec options:   {opts:?}");
     println!(
@@ -1525,7 +1559,7 @@ fn benchmark_lossy(
         rayon::current_num_threads()
     );
     print_shape(&layout);
-    println!("Raw bytes:       {:.3} MiB", mib(data.len() * 2));
+    println!("Raw bytes:       {:.3} MiB", mib(raw_bytes));
     println!("TIFF read/map:   {:.3} s", io0.elapsed().as_secs_f64());
     println!();
     println!("Lossy calibration:");
@@ -1550,12 +1584,12 @@ fn benchmark_lossy(
     println!("  total file:    {:.3} MiB", mib(stats.total_bytes));
     println!(
         "  ratio:         {:.2}:1",
-        stats.raw_bytes as f64 / stats.total_bytes as f64
+        raw_bytes as f64 / stats.total_bytes as f64
     );
     println!("  encode time:   {:.4} s", encode_time);
     println!(
         "  encode rate:   {:.3} GB/s",
-        gb_per_s(stats.raw_bytes, encode_time)
+        gb_per_s(raw_bytes, encode_time)
     );
 
     let mut decoded = vec![0u16; data.len()];
@@ -1569,10 +1603,7 @@ fn benchmark_lossy(
     println!();
     println!("Decompression:");
     println!("  decode time:   {:.4} s", ds_time);
-    println!(
-        "  decode rate:   {:.3} GB/s",
-        gb_per_s(stats.raw_bytes, ds_time)
-    );
+    println!("  decode rate:   {:.3} GB/s", gb_per_s(raw_bytes, ds_time));
     println!("  RMSE:          {:.4} ADU", rmse);
     println!("  MAE:           {:.4} ADU", mae);
     println!("  max abs error: {} ADU", max_abs);
@@ -1715,7 +1746,8 @@ fn main() {
                                                         println!(
                                                             "Lossless encode rate: {:.3} GB/s",
                                                             gb_per_s(
-                                                                stats.raw_bytes,
+                                                                stats.raw_bytes / 2
+                                                                    * info.sample_bytes,
                                                                 stats.seconds_total
                                                             )
                                                         );
@@ -1788,7 +1820,8 @@ fn main() {
                                                         println!(
                                                             "Lossy encode rate: {:.3} GB/s",
                                                             gb_per_s(
-                                                                stats.raw_bytes,
+                                                                stats.raw_bytes / 2
+                                                                    * info.sample_bytes,
                                                                 stats.seconds_total
                                                             )
                                                         );

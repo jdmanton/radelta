@@ -10,7 +10,7 @@ import zlib
 
 import numpy as np
 
-VERSION = "0.8.9"
+VERSION = "0.9.0"
 CODEC_ID = "radelta.radelta"
 _FRAME = struct.Struct("<4sBBHQI")
 _CONTEXT = {"signed3": 0, "signs": 1, "mean": 2, "mean-signs": 3}
@@ -70,10 +70,10 @@ def validate_shape(shape, max_bytes=MAX_CHUNK_BYTES):
     return shape
 
 
-def uint16_dtype(dtype):
+def unsigned_dtype(dtype):
     dtype = np.dtype(dtype)
-    if dtype.kind != "u" or dtype.itemsize != 2:
-        raise ValueError("Radelta requires unsigned 16-bit pixels")
+    if dtype.kind != "u" or dtype.itemsize not in (1, 2):
+        raise ValueError("Radelta requires unsigned 8-bit or 16-bit pixels")
     return dtype
 
 
@@ -110,7 +110,7 @@ def _dims(shape, axes):
 
 def encode_chunk(pixels, axes, options):
     pixels = np.asarray(pixels)
-    uint16_dtype(pixels.dtype)
+    unsigned_dtype(pixels.dtype)
     shape = validate_shape(pixels.shape)
     axes = validate_axes(axes, len(shape))
     native_axes = "".join(a for a in "tczyx" if a in axes)
@@ -130,7 +130,7 @@ def encode_chunk(pixels, axes, options):
         # Borrow the native allocation while calculating the frame checksum
         # and join directly into the final immutable bytes object.
         payload = memoryview(np.ctypeslib.as_array(encoded, shape=(size.value,)))
-        prefix = struct.pack("<4sBBHQ", b"RDZ1", 1, int(options["lossy"]), 0, src.nbytes)
+        prefix = struct.pack("<4sBBHQ", b"RDZ1", 1, int(options["lossy"]), 0, pixels.nbytes)
         checksum = zlib.crc32(payload, zlib.crc32(prefix))
         return b"".join((prefix, struct.pack("<I", checksum), payload))
     finally:
@@ -140,13 +140,13 @@ def encode_chunk(pixels, axes, options):
 def decode_chunk(encoded, shape, axes, dtype, options):
     shape = validate_shape(shape)
     axes = validate_axes(axes, len(shape))
-    dtype = uint16_dtype(dtype)
+    dtype = unsigned_dtype(dtype)
     encoded = bytes(encoded)
     if len(encoded) < _FRAME.size:
         raise ValueError("Truncated Radelta Zarr chunk")
     magic, version, mode, reserved, raw_size, checksum = _FRAME.unpack_from(encoded)
     if (magic != b"RDZ1" or version != 1 or reserved != 0 or mode != int(options["lossy"]) or
-            raw_size != math.prod(shape)*2):
+            raw_size != math.prod(shape)*dtype.itemsize):
         raise ValueError("Radelta Zarr chunk header does not match its array metadata")
     # bytes() above preserves snapshot semantics for mutable inputs. Both the
     # checksum and native decoder can borrow this immutable payload in place.
@@ -171,4 +171,6 @@ def decode_chunk(encoded, shape, axes, dtype, options):
     native_axes = "".join(a for a in "tczyx" if a in axes)
     sizes = dict(zip(axes, shape))
     result = data.reshape(tuple(sizes[a] for a in native_axes)).transpose(tuple(native_axes.index(a) for a in axes))
+    if dtype.itemsize == 1:
+        np.minimum(result, 255, out=result)
     return result.astype(dtype, copy=False)

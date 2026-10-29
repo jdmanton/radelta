@@ -161,12 +161,14 @@ def _metadata(group, axes, units, datasets, name, omero=None, pyramid=False):
 
 
 def create_ome_image(group, *, shape, axes="zyx", chunks=None, scale=None,
-                     translation=None, units=None, name="image", omero=None, **options):
-    """Create one uint16 OME-Zarr level and metadata; use normal Zarr slicing."""
+                     translation=None, units=None, name="image", omero=None, dtype="u2", **options):
+    """Create one uint8/uint16 OME-Zarr level and metadata; use normal Zarr slicing."""
     axes = validate_axes(axes, len(shape))
     shape = validate_shape(shape, max_bytes=None)
     if axes != "".join(a for a in "tczyx" if a in axes):
         raise ValueError("New OME images use axes in t,c,z,y,x order")
+    from ._native import unsigned_dtype
+    dtype = unsigned_dtype(dtype)
     options = validate_options(options)
     chunks = validate_shape(chunks or default_chunks(shape, axes))
     if len(chunks) != len(shape):
@@ -178,7 +180,7 @@ def create_ome_image(group, *, shape, axes="zyx", chunks=None, scale=None,
     _axes_metadata(axes, units)  # Validate before creating anything.
     if "0" in group:
         raise ValueError("Image group already contains level 0")
-    arr = _array(group, "0", shape=shape, chunks=chunks, axes=axes, **options)
+    arr = _array(group, "0", shape=shape, chunks=chunks, axes=axes, dtype=dtype, **options)
     _metadata(group, axes, units, [{"path": "0", "coordinateTransformations": _transforms(scale, translation)}], name, omero)
     return arr
 
@@ -193,8 +195,8 @@ def write_image(group, data, *, axes="zyx", chunks=None, scale=None, translation
     shape = tuple(data.shape)
     workers = _workers(workers)
     dtype = np.dtype(data.dtype)
-    if dtype.kind != "u" or dtype.itemsize != 2:
-        raise ValueError("OME image source must be uint16")
+    if dtype.kind != "u" or dtype.itemsize not in (1, 2):
+        raise ValueError("OME image source must be uint8 or uint16")
     axes = validate_axes(axes, len(shape))
     if not isinstance(levels, int) or levels < 1:
         raise ValueError("levels must be a positive integer")
@@ -205,8 +207,8 @@ def write_image(group, data, *, axes="zyx", chunks=None, scale=None, translation
     if levels > 1 + math.ceil(math.log2(max(shape[-2:]))):
         raise ValueError("Too many levels for the image dimensions")
     arr = create_ome_image(group, shape=shape, axes=axes, chunks=chunks, scale=scale,
-                           translation=translation, units=units, name=name, omero=omero, **options)
-    blocks = ((selection, np.array(data[selection], dtype=np.uint16, order="C", copy=True))
+                           translation=translation, units=units, name=name, omero=omero, dtype=dtype, **options)
+    blocks = ((selection, np.array(data[selection], dtype=dtype, order="C", copy=True))
               for selection in chunk_slices(shape, arr.chunks))
     _write_chunks(arr, blocks, workers=workers, path="0", progress=progress)
     datasets = [{"path": "0", "coordinateTransformations": _transforms(_vector(scale, axes, 1), _vector(translation, axes, 0))}]
@@ -215,7 +217,7 @@ def write_image(group, data, *, axes="zyx", chunks=None, scale=None, translation
         parent = arr
         fy, fx = (2 if n > 1 else 1 for n in parent.shape[-2:])
         child_shape = (*parent.shape[:-2], (parent.shape[-2]+fy-1)//fy, (parent.shape[-1]+fx-1)//fx)
-        arr = _array(group, str(level), shape=child_shape, chunks=default_chunks(child_shape, axes), axes=axes, **options)
+        arr = _array(group, str(level), shape=child_shape, chunks=default_chunks(child_shape, axes), axes=axes, dtype=dtype, **options)
         def pyramid_blocks():
             for selection in chunk_slices(child_shape, arr.chunks):
                 sy, sx = selection[-2:]
@@ -226,7 +228,7 @@ def write_image(group, data, *, axes="zyx", chunks=None, scale=None, translation
                     block = np.pad(block, pad, mode="edge")
                 block = block.reshape(*block.shape[:-2], sy.stop-sy.start, fy, sx.stop-sx.start, fx)
                 total = block.sum(axis=(-1, -3), dtype=np.uint32)
-                yield selection, ((total + fy*fx//2)//(fy*fx)).astype(np.uint16)
+                yield selection, ((total + fy*fx//2)//(fy*fx)).astype(dtype)
         _write_chunks(arr, pyramid_blocks(), workers=workers, path=str(level), progress=progress)
         for index, factor in ((len(axes)-2, fy), (len(axes)-1, fx)):
             current_translation[index] += current_scale[index]*(factor-1)/2
@@ -269,7 +271,7 @@ def _image_arrays(root):
 
 
 def repack(input_path, output_path, *, chunks=None, compression="radelta", progress=None, **options):
-    """Recompress declared uint16 multiscales in a local OME-Zarr hierarchy.
+    """Recompress declared uint8/uint16 multiscales in a local OME-Zarr hierarchy.
 
     Copy other arrays/groups/sidecars verbatim. Labels are always lossless.
     Publish a new directory only after all conversions succeed.
@@ -287,13 +289,13 @@ def repack(input_path, output_path, *, chunks=None, compression="radelta", progr
     if not arrays:
         raise ValueError("No OME-Zarr multiscales found")
     convertible = [(path, names, label) for path, (names, label) in arrays.items()
-                   if root[path].dtype.kind == "u" and root[path].dtype.itemsize == 2]
+                   if root[path].dtype.kind == "u" and root[path].dtype.itemsize in (1, 2)]
     for path, names, label in convertible:
         validate_axes(names, root[path].ndim)
         if chunks is not None and len(chunks) != root[path].ndim:
             raise ValueError(f"Chunk rank does not match {path}")
     if not convertible:
-        raise ValueError("No uint16 OME image or label arrays found")
+        raise ValueError("No uint8/uint16 OME image or label arrays found")
     if compression not in {"radelta", "zstd", "none"}:
         raise ValueError("compression must be radelta, zstd or none")
     if compression != "radelta" and options["lossy"]:

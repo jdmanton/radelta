@@ -110,7 +110,7 @@ public final class RadeltaImageFactory {
                 "Dataset: " + rf.width + " x " + rf.height +
                 ", C=" + rf.channels + ", Z=" + rf.slices + ", T=" + rf.frames + "\n" +
                 "Format: " + formatName(rf.format) + (rf.lossy ? " (lossy)" : " (lossless)") + "\n\n" +
-                "Minimum pixel memory for a fully loaded 16-bit volume: " + formatBytes(pixelBytes) + "\n" +
+                "Minimum pixel memory for a fully loaded volume: " + formatBytes(pixelBytes) + "\n" +
                 "Current Java heap limit: " + formatBytes(BigInteger.valueOf(maxHeap)) + "\n" +
                 "Approx. unused Java heap now: " + formatBytes(BigInteger.valueOf(heapHeadroom)) + "\n\n" +
                 "A full load also needs additional Java/ImageJ and Radelta decoding overhead.\n" +
@@ -207,7 +207,7 @@ public final class RadeltaImageFactory {
                 final short[][] planes = rf.readPlanes(tcz);
                 for (int k = 0; k < count; ++k) {
                     stack.addSlice("C=" + (tcz[3 * k + 1] + 1) + " Z=" + (tcz[3 * k + 2] + 1)
-                            + " T=" + (tcz[3 * k] + 1), planes[k]);
+                            + " T=" + (tcz[3 * k] + 1), RadeltaMetadata.imagePixels(planes[k], rf.bitDepth));
                 }
                 first += count;
                 IJ.showProgress((double) first / (double) totalPlanes);

@@ -14,6 +14,26 @@ from radelta._native import U8, library, pixel_pointer
 
 
 class ArrayTests(unittest.TestCase):
+    def test_uint8_arrays_streaming_and_lossy_saturation(self):
+        # Include every byte, unusual axes and negative strides.
+        image = np.arange(512, dtype=np.uint16).astype(np.uint8).reshape(2, 2, 2, 8, 8)
+        image = image.transpose(4, 2, 0, 1, 3)[::-1]
+        for lossy in (False, True):
+            options = dict(lossy=True, offset_adu=0, gain_e_per_adu=1) if lossy else {}
+            expected = np.minimum(np.floor(np.sqrt(image.astype(float))+.5)**2, 255).astype(np.uint8) if lossy else image
+            decoded = radelta.decompress(radelta.compress(image, axes="xztcy", **options))
+            self.assertEqual(decoded.dtype, np.uint8)
+            np.testing.assert_array_equal(decoded, expected)
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "bytes.rdlt"
+                radelta.write(path, image, axes="xztcy", memory_mib=1, **options)
+                decoded = radelta.read(path)
+                self.assertEqual(decoded.dtype, np.uint8)
+                np.testing.assert_array_equal(decoded, expected)
+                with radelta.open(path) as dataset:
+                    self.assertEqual(dataset.dtype, np.uint8)
+                    np.testing.assert_array_equal(dataset[::-2, :, 1], expected[::-2, :, 1])
+
     def test_decompress_accepts_immutable_mutable_and_strided_buffers(self):
         image = np.arange(105, dtype=np.uint16).reshape(3, 5, 7) * 317
         encoded = radelta.compress(image)

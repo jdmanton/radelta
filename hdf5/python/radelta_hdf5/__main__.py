@@ -38,7 +38,7 @@ def encode_tiff(args, target):
         series = tif.series[0]
         axes, out_axes, shape = canonical_tiff(series, args.axes)
         ds = create_dataset(out, args.dataset, shape=shape, chunks=args.chunks,
-                            filter_id=args.filter_id, **args.codec)
+                            dtype=series.dtype, filter_id=args.filter_id, **args.codec)
         ds.attrs["source_tiff_axes"] = axes
         if tif.pages[0].description:
             ds.attrs["source_tiff_description"] = tif.pages[0].description
@@ -46,7 +46,7 @@ def encode_tiff(args, target):
         total = math.prod(math.ceil(n/c) for n, c in zip(shape, ds.chunks))
         progress = Progress(total)
         for selection in chunk_slices(shape, ds.chunks):
-            block = np.empty(tuple(s.stop-s.start for s in selection), dtype=np.uint16)
+            block = np.empty(tuple(s.stop-s.start for s in selection), dtype=series.dtype)
             leading = tuple(range(s.start, s.stop) for s in selection[:-2])
             for coord in itertools.product(*leading):
                 mapped = dict(zip(out_axes[:-2], coord))
@@ -94,15 +94,15 @@ def repack_hdf5(args, target):
 def decode_tiff(args, target):
     with h5py.File(args.input, "r") as source:
         ds = source[args.dataset]
-        if ds.dtype.kind != "u" or ds.dtype.itemsize != 2 or not 2 <= ds.ndim <= 5 or any(n == 0 for n in ds.shape):
-            raise ValueError("Expected a nonempty uint16 dataset of rank 2..5")
+        if ds.dtype.kind != "u" or ds.dtype.itemsize not in (1, 2) or not 2 <= ds.ndim <= 5 or any(n == 0 for n in ds.shape):
+            raise ValueError("Expected a nonempty uint8 or uint16 dataset of rank 2..5")
         progress = Progress(math.prod(ds.shape[:-2]))
         def planes():
             for coord in np.ndindex(ds.shape[:-2]):
-                yield np.asarray(ds[coord], dtype=np.uint16)
+                yield np.asarray(ds[coord], dtype=ds.dtype)
                 progress.advance()
         with tifffile.TiffWriter(target, bigtiff=True) as out:
-            out.write(planes(), shape=ds.shape, dtype=np.uint16,
+            out.write(planes(), shape=ds.shape, dtype=ds.dtype,
                       photometric="minisblack", metadata={"axes": "TCZYX"[-ds.ndim:]})
 
 

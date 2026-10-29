@@ -37,8 +37,8 @@ class TiffSource:
         sizes = dict(zip(self.source_axes, self.series.shape))
         self.shape = tuple(sizes[a] for a in self.axes)
         self.dtype = np.dtype(self.series.dtype)
-        if self.dtype.kind != "u" or self.dtype.itemsize != 2:
-            raise ValueError("TIFF source must be grayscale uint16")
+        if self.dtype.kind != "u" or self.dtype.itemsize not in (1, 2):
+            raise ValueError("TIFF source must be grayscale uint8 or uint16")
         if len(self.series.pages) != int(np.prod(self.series.shape[:-2])):
             raise ValueError("TIFF must have one YX plane per page; volumetric pages are unsupported")
         if any(tuple(p.shape) != tuple(self.series.shape[-2:]) for p in self.series.pages):
@@ -62,7 +62,7 @@ class TiffSource:
                         continue
                     color = f"{(int(e.get('Color')) & 0xffffffff) >> 8:06X}" if e.get("Color") else "FFFFFF"
                     channels.append({"label": e.get("Name", e.get("ID", "channel")), "color": color,
-                                     "window": {"min": 0, "max": 65535, "start": 0, "end": 65535}, "active": True})
+                                     "window": {"min": 0, "max": int(np.iinfo(self.dtype).max), "start": 0, "end": int(np.iinfo(self.dtype).max)}, "active": True})
                 if "c" in self.axes and len(channels) == sizes["c"]:
                     self.omero = {"channels": channels}
         elif tif.imagej_metadata:
@@ -103,7 +103,7 @@ class TiffSource:
         if len(selection) != len(self.shape) or any(not isinstance(s, slice) or s.step not in (None, 1) for s in selection):
             raise ValueError("TIFF source accepts unit-step chunk slices only")
         normalized = tuple(slice(*s.indices(n)[:2]) for s, n in zip(selection, self.shape))
-        block = np.empty(tuple(s.stop-s.start for s in normalized), dtype=np.uint16)
+        block = np.empty(tuple(s.stop-s.start for s in normalized), dtype=self.dtype)
         for coord in itertools.product(*(range(s.start, s.stop) for s in normalized[:-2])):
             mapped = dict(zip(self.axes[:-2], coord))
             source_coord = tuple(mapped[a] for a in self.source_axes[:-2])

@@ -20,8 +20,8 @@ def layout(shape, axes=None, dtype=np.uint16):
             any(a not in "tczyx" for a in axes) or not {"y", "x"}.issubset(axes) or
             any(n <= 0 or n > 0xffffffff for n in shape)):
         raise ValueError("Expected positive uint32 dimensions of rank 2..5, with unique TCZYX axes including Y and X")
-    if dtype.kind != "u" or dtype.itemsize != 2:
-        raise ValueError("Radelta requires uint16 pixels")
+    if dtype.kind != "u" or dtype.itemsize not in (1, 2):
+        raise ValueError("Radelta requires uint8 or uint16 pixels")
     return shape, axes, dtype
 
 

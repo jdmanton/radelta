@@ -12,6 +12,24 @@ import java.nio.file.Path;
 import static org.junit.Assert.*;
 
 public class RadeltaOpeningTest {
+    @Test
+    public void unsignedBytesReopenAtOriginalDepthInBothModes() throws Exception {
+        ImageStack stack = new ImageStack(4, 1);
+        stack.addSlice("bytes", new byte[] {0, 127, (byte) 128, (byte) 255});
+        Path path = Files.createTempFile("radelta-u8-", ".rdlt");
+        try {
+            RadeltaExporter.saveLossless(new ImagePlus("source", stack), path.toString(), 1);
+            for (boolean memory : new boolean[] {false, true}) {
+                ImagePlus image = RadeltaImageFactory.openForDisplay(path.toString(), memory);
+                try {
+                    assertEquals(8, image.getBitDepth());
+                    assertArrayEquals(new byte[] {0, 127, (byte) 128, (byte) 255},
+                            (byte[]) image.getStack().getPixels(1));
+                } finally { image.close(); }
+            }
+        } finally { Files.deleteIfExists(path); }
+    }
+
     private Path writeImage() throws IOException {
         ImageStack stack = new ImageStack(2, 1);
         stack.addSlice("first", new short[] {1, 7});

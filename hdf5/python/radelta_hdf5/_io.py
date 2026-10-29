@@ -18,8 +18,8 @@ def canonical_tiff(series, axes_override):
     if (len(axes) != len(series.shape) or len(set(axes)) != len(axes) or
             not axes.endswith("YX") or any(a not in "TCZYX" for a in axes)):
         raise ValueError(f"Unsupported TIFF axes {axes!r}; use --axes with TCZYX axes ending in YX")
-    if np.dtype(series.dtype).kind != "u" or np.dtype(series.dtype).itemsize != 2:
-        raise ValueError("TIFF data must be grayscale uint16")
+    if np.dtype(series.dtype).kind != "u" or np.dtype(series.dtype).itemsize not in (1, 2):
+        raise ValueError("TIFF data must be grayscale uint8 or uint16")
     if len(series.pages) != math.prod(series.shape[:-2]):
         raise ValueError("TIFF must store one YX plane per page; volumetric TIFF pages are unsupported")
     if any(tuple(p.shape) != tuple(series.shape[-2:]) for p in series.pages):
