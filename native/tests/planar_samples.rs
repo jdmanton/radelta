@@ -206,6 +206,7 @@ fn write_fixture_mode(path: &Path, f: &Fixture, compressed: bool, tiled: bool) {
 
 fn radelta(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_radelta"))
+        .arg("--force")
         .args(args)
         .output()
         .unwrap()

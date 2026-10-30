@@ -79,9 +79,11 @@ public class RadeltaPyramidTest {
         String library = System.getenv("RADELTA_NATIVE_LIBRARY");
         assertNotNull("Native/CLI test build must be supplied", library);
         String exe = System.getProperty("os.name").startsWith("Windows") ? "radelta.exe" : "radelta";
-        String[] command = new String[args.length + 1];
+        // The matrix deliberately reuses its private temporary output paths.
+        String[] command = new String[args.length + 2];
         command[0] = Paths.get(library).toAbsolutePath().getParent().resolve(exe).toString();
-        System.arraycopy(args, 0, command, 1, args.length);
+        command[1] = "--force";
+        System.arraycopy(args, 0, command, 2, args.length);
         Path log = Files.createTempFile("radelta-pyramid-cli-", ".log");
         try {
             Process process = new ProcessBuilder(command).redirectErrorStream(true)

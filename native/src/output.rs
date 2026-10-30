@@ -81,6 +81,20 @@ impl PendingOutput {
         self.published = true;
         Ok(())
     }
+
+    /// Publish atomically only if the destination is absent. The sibling
+    /// temporary file shares the destination filesystem. Retain cleanup on
+    /// Drop in case removing its original hard link fails while a writer is open.
+    pub fn publish_no_replace(&mut self) -> io::Result<()> {
+        fs::hard_link(&self.temporary, &self.destination).map_err(|e| {
+            io::Error::new(e.kind(), format!(
+                "cannot publish '{}' without replacing an existing file: {e}; use --force to allow replacement",
+                self.destination.display()
+            ))
+        })?;
+        let _ = fs::remove_file(&self.temporary);
+        Ok(())
+    }
 }
 
 impl Drop for PendingOutput {
@@ -88,5 +102,39 @@ impl Drop for PendingOutput {
         if !self.published {
             let _ = fs::remove_file(&self.temporary);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn no_replace_publication_preserves_a_competing_output_and_cleans_up() {
+        let root = std::env::temp_dir().join(format!("radelta-publish-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("result");
+        {
+            let (mut pending, mut file) = PendingOutput::create(&destination).unwrap();
+            file.write_all(b"encoded data").unwrap();
+            drop(file);
+            fs::write(&destination, b"competing output").unwrap();
+            assert_eq!(
+                pending.publish_no_replace().unwrap_err().kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(fs::read(&destination).unwrap(), b"competing output");
+        }
+        fs::remove_file(&destination).unwrap();
+        {
+            let (mut pending, mut file) = PendingOutput::create(&destination).unwrap();
+            file.write_all(b"encoded data").unwrap();
+            drop(file);
+            pending.publish_no_replace().unwrap();
+            assert_eq!(fs::read(&destination).unwrap(), b"encoded data");
+        }
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 }

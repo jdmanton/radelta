@@ -1,6 +1,6 @@
 # Radelta
 
-Radelta quickly and efficiently compresses 16-bit fluorescence microscopy images, without needing a GPU.
+Radelta compresses unsigned 8-bit and 16-bit fluorescence microscopy images, without needing a GPU.
 It works with TIFF stacks, ImageJ/Fiji, Python/NumPy, HDF5 and OME-Zarr, and offers two modes:
 
 - **Lossless** (default): every pixel is restored exactly.
@@ -121,7 +121,9 @@ radelta encode-lossy stack.tif stack-lossy.rdlt \
 ```
 
 `encode` reads OME-TIFF and ImageJ dimensions automatically and keeps the TIFF metadata, which `decode` restores.
-Existing output files are replaced.
+Output filenames are optional: `radelta encode stack.tif` writes `stack.rdlt`.
+Existing outputs are preserved unless you add `--force`. Use `--threads N` to
+choose the worker count, `--quiet` for scripts, and `radelta encode --help` for options.
 Large stacks are compressed in bounded memory automatically (2 GiB by default; set it with `--memory-mib`). See the [command-line reference](docs/CLI.md) for all options.
 
 

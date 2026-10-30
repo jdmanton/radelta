@@ -1422,6 +1422,16 @@ impl RadeltaStreamWriter {
     }
 
     pub fn finish(&mut self) -> std::result::Result<(), String> {
+        self.finish_impl(true)
+    }
+
+    /// Finish without replacing an existing destination, including one created
+    /// while encoding was in progress. Other writer APIs retain replacement.
+    pub fn finish_no_replace(&mut self) -> std::result::Result<(), String> {
+        self.finish_impl(false)
+    }
+
+    fn finish_impl(&mut self, replace: bool) -> std::result::Result<(), String> {
         if let Some(e) = &self.failed {
             return Err(e.clone());
         }
@@ -1447,7 +1457,14 @@ impl RadeltaStreamWriter {
         }
         let result = crate::metadata::finish_new_file_metadata(&mut self.out, &self.metadata)
             .map_err(|e| e.to_string())
-            .and_then(|()| self.pending_output.publish().map_err(|e| e.to_string()));
+            .and_then(|()| {
+                if replace {
+                    self.pending_output.publish()
+                } else {
+                    self.pending_output.publish_no_replace()
+                }
+                .map_err(|e| e.to_string())
+            });
         if let Err(e) = result {
             self.failed = Some(e.clone());
             return Err(e);
@@ -2253,6 +2270,34 @@ mod tests {
             assert!(writer.finish().is_err());
         }
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn streaming_finish_no_replace_preserves_a_competing_output() {
+        let path = temp_path("stream-no-replace");
+        let dims = Dims5 {
+            x: 2,
+            y: 2,
+            z: 1,
+            c: 1,
+            t: 1,
+        };
+        {
+            let mut writer = RadeltaStreamWriter::new(
+                path.clone(),
+                dims,
+                WriterMode::Lossless(Options::default()),
+                1,
+            )
+            .unwrap();
+            writer.write_plane(0, 0, 0, &[1, 2, 3, 4]).unwrap();
+            fs::write(&path, b"competing output").unwrap();
+            let error = writer.finish_no_replace().unwrap_err();
+            assert!(error.contains("without replacing"), "{error}");
+            assert_eq!(writer.finish_no_replace().unwrap_err(), error);
+            assert_eq!(fs::read(&path).unwrap(), b"competing output");
+        }
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

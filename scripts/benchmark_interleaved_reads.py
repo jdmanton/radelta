@@ -132,6 +132,9 @@ def main():
                 for repeat in range(args.repeats + 1):
                     for i in ([0, 1] if repeat % 2 == 0 else [1, 0]):
                         binary = [args.baseline_cli, args.candidate_cli][i]
+                        # Generated fixture output; keep cleanup outside timing
+                        # and remain compatible with older CLIs without --force.
+                        outputs[i].unlink(missing_ok=True)
                         start = time.perf_counter()
                         run = subprocess.run([str(binary.resolve()), "decode", str(path.resolve()),
                             str(outputs[i].resolve()), "--page-order", page_order], capture_output=True, text=True)

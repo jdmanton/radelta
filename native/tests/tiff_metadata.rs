@@ -11,6 +11,7 @@ use tiff::{
 };
 fn run(args: &[&str]) {
     let output = Command::new(env!("CARGO_BIN_EXE_radelta"))
+        .arg("--force")
         .args(args)
         .output()
         .unwrap();

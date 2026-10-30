@@ -14,6 +14,7 @@ fn temp_path(name: &str) -> PathBuf {
 
 fn run(args: &[&str]) {
     let result = Command::new(env!("CARGO_BIN_EXE_radelta"))
+        .arg("--force")
         .args(args)
         .output()
         .unwrap();
@@ -149,6 +150,7 @@ fn single_plane_keeps_its_colormap() {
             vec!["decode", rdlt.to_str().unwrap(), out.to_str().unwrap()],
         ] {
             let r = Command::new(env!("CARGO_BIN_EXE_radelta"))
+                .arg("--force")
                 .args(&args)
                 .output()
                 .unwrap();

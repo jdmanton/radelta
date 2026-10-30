@@ -57,6 +57,7 @@ fn classic_and_big_tiff_raw_and_compressed_roundtrip_in_memory_and_streaming() {
                 let encoded = root.join("image.rdlt");
                 let output = root.join("output.tif");
                 let mut command = Command::new(env!("CARGO_BIN_EXE_radelta"));
+                command.arg("--force");
                 command.arg("encode").arg(&input).arg(&encoded);
                 if stream {
                     command.args(["--stream", "--memory-mib", "1"]);
@@ -68,6 +69,7 @@ fn classic_and_big_tiff_raw_and_compressed_roundtrip_in_memory_and_streaming() {
                     String::from_utf8_lossy(&result.stderr)
                 );
                 let result = Command::new(env!("CARGO_BIN_EXE_radelta"))
+                    .arg("--force")
                     .arg("decode")
                     .arg(&encoded)
                     .arg(&output)

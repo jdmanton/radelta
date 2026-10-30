@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.2
+
+- Replace positional-only CLI parsing with command-specific help, version output,
+  explicit argument errors and validation before opening files;
+- Accept options before or after paths, `--option=value`, `--output`/`-o`,
+  native non-UTF-8 paths and `--` for filenames beginning with a hyphen;
+- Infer output filenames when omitted, retain input files, and require `--force`
+  to replace existing output; publish without replacement atomically by default;
+- Add `--threads`/`-j` and `--quiet`/`-q`; honor positive memory allowances
+  without silently raising them to 64 MiB;
+- Document CLI defaults, exit codes, scripting and calibrated lossy options.
+
 ## 0.9.1
 
 - Fix a file-reader deadlock when concurrent single-plane and batched reads

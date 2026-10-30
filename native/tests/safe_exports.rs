@@ -9,6 +9,7 @@ use tiff::encoder::{colortype, TiffEncoder};
 
 fn run(command: &str, input: &Path, output: &Path, extra: &[&str]) -> Output {
     let mut invocation = Command::new(env!("CARGO_BIN_EXE_radelta"));
+    invocation.arg("--force");
     invocation.arg(command).arg(input).arg(output).args(extra);
     if command == "encode-lossy" {
         invocation.args(["--offset-adu", "0", "--gain-e-per-adu", "1"]);

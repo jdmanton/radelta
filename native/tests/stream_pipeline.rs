@@ -39,6 +39,7 @@ fn late_decode_and_tiff_read_errors_preserve_destinations_and_join_workers() {
     fs::write(&input, bytes).unwrap();
     fs::write(&output, b"keep the previous TIFF").unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_radelta"))
+        .arg("--force")
         .arg("decode")
         .arg(&input)
         .arg(&output)
@@ -106,6 +107,7 @@ fn late_decode_and_tiff_read_errors_preserve_destinations_and_join_workers() {
     fs::write(&source, bytes).unwrap();
     fs::write(&encoded, b"keep the previous Radelta file").unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_radelta"))
+        .arg("--force")
         .arg("encode")
         .arg(&source)
         .arg(&encoded)

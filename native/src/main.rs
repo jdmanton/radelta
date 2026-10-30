@@ -1,14 +1,25 @@
+mod cli;
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FORCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+macro_rules! report {
+    ($($arg:tt)*) => {
+        if !QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+            // A closed report pipe should not panic while processing a file.
+            let _ = writeln!(std::io::stdout().lock(), $($arg)*);
+        }
+    };
+}
 mod ome;
 mod prefetch;
 mod tiff_export;
 mod tiff_io;
 mod tiff_metadata;
+use clap::Parser;
 use ome::infer_ome_layout;
 use radelta_native::{
-    compress_lossy_u16_nd_with_stats, compress_u16_nd_with_stats, decompress_u16_nd_into,
-    ContextMode, Dims5, LossyOptions, Options, DEFAULT_STREAM_MEMORY_MIB,
+    compress_lossy_u16_nd_with_stats, compress_u16_nd_with_stats, decompress_u16_nd_into, Dims5,
+    LossyOptions, Options, DEFAULT_STREAM_MEMORY_MIB,
 };
-use std::env;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -60,215 +71,6 @@ struct ResolvedLayout {
     page_order: String,
     source: String,
     ifd_coords: Option<Vec<(usize, usize, usize)>>,
-}
-
-fn usage() -> ! {
-    eprintln!(
-        "Usage:\n  \\
-         radelta encode INPUT.tif OUTPUT.rdlt [codec options] [dataset options]\n  \\
-         radelta encode-lossy INPUT.tif OUTPUT.rdlt --offset-adu O (--gain-e-per-adu G | --gain-adu-per-e G) [--noise-step D] [codec options] [dataset options]\n  \\
-         radelta decode INPUT.rdlt OUTPUT.tif [--page-order TCZ] [--memory-mib N]\n\n\
-         Benchmarks (in memory, median of 3 runs after warm-up):\n  \
-           radelta benchmark INPUT.tif [--repeats N] [codec options] [dataset options]\n  \
-           radelta benchmark-lossy INPUT.tif --offset-adu O --gain-e-per-adu G [--noise-step D] [--repeats N] [codec options] [dataset options]\n\n\
-         Codec options:\n  \\
-           --block-depth N\n  \\
-           --context mean|mean-signs|signed3|signs\n  \\
-           --scale-bits N\n\n\
-         Dataset options (normally unnecessary when metadata are present):\n  \\
-           --t N                 override inferred number of timepoints\n  \\
-           --c N                 override inferred number of channels\n  \\
-           --z N                 override inferred number of Z planes\n  \\
-           --page-order TCZ      override page axes, slowest to fastest\n  \\
-           --ignore-metadata     do not use OME/ImageJ dimensional metadata\n  \
-           --memory-mib N        approximate streaming RAM budget (default 2048)\n  \
-           --stream              force chunked out-of-core encoding\n\n\
-         Metadata option (all commands): --metadata-limit-mib N (default 1024).\n\n\
-         TIFF metadata is preserved; decode restores source page order by default.\n\n\
-         Metadata inference:\n  \\
-           * OME-TIFF: SizeT/SizeC/SizeZ + DimensionOrder from OME-XML.\n  \\
-             Local TiffData IFD mappings and complete file subsets are honored.\n  \\
-           * ImageJ/Fiji TIFF: channels/slices/frames; ImageJ CZT storage order.\n  \\
-           * Plain TIFF fallback: T=1, C=1, Z=number of pages.\n\n\
-         Examples:\n  \\
-           radelta encode stack_or_hyperstack.tif output.rdlt\n  \\
-           radelta encode odd_vendor.tif output.rdlt --ignore-metadata --t 20 --c 4 --page-order TZC\n\n\
-         Canonical library memory order is T,C,Z,Y,X (X fastest).\n  \\
-         Spatial contexts never cross channel or time boundaries.\n\n\
-         Lossy transform:\n  \\
-           electrons = max((ADU - offset_adu) * gain_e_per_adu, 0)\n  \\
-           z         = 2*sqrt(electrons)\n  \\
-           q         = round(z / noise_step)\n\n\
-         Notes:\n  \\
-         * X and Y may be rectangular; all pages in one dense TIFF dataset must share X/Y.\n  \\
-         * The CLI expects uint8 or uint16 pages. Planar multi-sample pages are read as channels; interleaved RGB is rejected.\n  \\
-         * Multi-file OME-TIFF datasets are not yet assembled automatically.\n  \\
-         * Single volumes use RDL1/RDLQ; multidimensional files use RDM2/RDQ2."
-    );
-    std::process::exit(2);
-}
-
-fn parse_usize_arg(args: &[String], i: &mut usize) -> usize {
-    *i += 1;
-    args.get(*i)
-        .unwrap_or_else(|| usage())
-        .parse()
-        .unwrap_or_else(|_| usage())
-}
-
-fn parse_u32_arg(args: &[String], i: &mut usize) -> u32 {
-    parse_usize_arg(args, i)
-        .try_into()
-        .unwrap_or_else(|_| usage())
-}
-
-fn parse_dataset_option(args: &[String], i: &mut usize, ds: &mut DatasetArgs) -> bool {
-    match args[*i].as_str() {
-        "--t" => {
-            ds.t = Some(parse_usize_arg(args, i));
-            true
-        }
-        "--c" => {
-            ds.c = Some(parse_usize_arg(args, i));
-            true
-        }
-        "--z" => {
-            ds.z = Some(parse_usize_arg(args, i));
-            true
-        }
-        "--page-order" => {
-            *i += 1;
-            ds.page_order = Some(args.get(*i).unwrap_or_else(|| usage()).to_ascii_uppercase());
-            true
-        }
-        "--ignore-metadata" => {
-            ds.ignore_metadata = true;
-            true
-        }
-        "--memory-mib" => {
-            ds.memory_mib = parse_usize_arg(args, i).max(64);
-            true
-        }
-        "--stream" => {
-            ds.force_stream = true;
-            true
-        }
-        _ => false,
-    }
-}
-
-fn parse_lossless_args(args: &[String]) -> (Options, DatasetArgs) {
-    let mut o = Options::default();
-    let mut ds = DatasetArgs::default();
-    let mut i = 0usize;
-    while i < args.len() {
-        if parse_dataset_option(args, &mut i, &mut ds) {
-            i += 1;
-            continue;
-        }
-        match args[i].as_str() {
-            "--block-depth" => o.block_depth = parse_u32_arg(args, &mut i),
-            "--scale-bits" => o.scale_bits = parse_u32_arg(args, &mut i),
-            "--context" => {
-                i += 1;
-                o.context_mode = match args.get(i).map(|s| s.as_str()) {
-                    Some("signed3") => ContextMode::Signed3 as u32,
-                    Some("signs") => ContextMode::Signs as u32,
-                    Some("mean") => ContextMode::Mean as u32,
-                    Some("mean-signs") => ContextMode::MeanSigns as u32,
-                    _ => usage(),
-                };
-            }
-            _ => usage(),
-        }
-        i += 1;
-    }
-    if let Some(ref order) = ds.page_order {
-        validate_page_order(order).unwrap_or_else(|_| usage());
-    }
-    (o, ds)
-}
-
-fn parse_lossy_args(args: &[String]) -> (LossyOptions, DatasetArgs) {
-    let mut o = LossyOptions::default();
-    let mut ds = DatasetArgs::default();
-    let mut have_offset = false;
-    let mut have_gain = false;
-    let mut i = 0usize;
-    while i < args.len() {
-        if parse_dataset_option(args, &mut i, &mut ds) {
-            i += 1;
-            continue;
-        }
-        match args[i].as_str() {
-            "--block-depth" => o.block_depth = parse_u32_arg(args, &mut i),
-            "--scale-bits" => o.scale_bits = parse_u32_arg(args, &mut i),
-            "--context" => {
-                i += 1;
-                o.context_mode = match args.get(i).map(|s| s.as_str()) {
-                    Some("signed3") => ContextMode::Signed3 as u32,
-                    Some("signs") => ContextMode::Signs as u32,
-                    Some("mean") => ContextMode::Mean as u32,
-                    Some("mean-signs") => ContextMode::MeanSigns as u32,
-                    _ => usage(),
-                };
-            }
-            "--offset-adu" => {
-                i += 1;
-                o.offset_adu = args
-                    .get(i)
-                    .unwrap_or_else(|| usage())
-                    .parse()
-                    .unwrap_or_else(|_| usage());
-                have_offset = true;
-            }
-            "--gain-e-per-adu" => {
-                if have_gain {
-                    usage();
-                }
-                i += 1;
-                o.gain_e_per_adu = args
-                    .get(i)
-                    .unwrap_or_else(|| usage())
-                    .parse()
-                    .unwrap_or_else(|_| usage());
-                have_gain = true;
-            }
-            "--gain-adu-per-e" => {
-                if have_gain {
-                    usage();
-                }
-                i += 1;
-                let g: f64 = args
-                    .get(i)
-                    .unwrap_or_else(|| usage())
-                    .parse()
-                    .unwrap_or_else(|_| usage());
-                if !g.is_finite() || g <= 0.0 {
-                    usage();
-                }
-                o.gain_e_per_adu = 1.0 / g;
-                have_gain = true;
-            }
-            "--noise-step" => {
-                i += 1;
-                o.noise_step = args
-                    .get(i)
-                    .unwrap_or_else(|| usage())
-                    .parse()
-                    .unwrap_or_else(|_| usage());
-            }
-            _ => usage(),
-        }
-        i += 1;
-    }
-    if !have_offset || !have_gain {
-        usage();
-    }
-    if let Some(ref order) = ds.page_order {
-        validate_page_order(order).unwrap_or_else(|_| usage());
-    }
-    (o, ds)
 }
 
 fn validate_page_order(order: &str) -> Result<(), String> {
@@ -1102,7 +904,9 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
             ));
         }
         physical_pages += 1;
-        if last_scan_report.elapsed().as_secs_f64() >= 2.0 {
+        if !QUIET.load(std::sync::atomic::Ordering::Relaxed)
+            && last_scan_report.elapsed().as_secs_f64() >= 2.0
+        {
             eprintln!(
                 "Scanning TIFF directories: {} physical pages found ({:.1} s elapsed)...",
                 physical_pages,
@@ -1111,7 +915,9 @@ fn inspect_streaming_dataset(path: &Path, ds: &DatasetArgs) -> Result<StreamingD
             last_scan_report = Instant::now();
         }
     }
-    if scan_start.elapsed().as_secs_f64() >= 2.0 {
+    if !QUIET.load(std::sync::atomic::Ordering::Relaxed)
+        && scan_start.elapsed().as_secs_f64() >= 2.0
+    {
         eprintln!(
             "TIFF directory scan complete: {} physical pages in {:.1} s.",
             physical_pages,
@@ -1215,9 +1021,11 @@ fn encode_streaming_lossy(
         ds.memory_mib,
     )?;
     encode_streaming(input, output, ds, info, writer)?;
-    println!(
+    report!(
         "offset={:.6} ADU, gain={:.6} e-/ADU, noise-step={:.6}",
-        opts.offset_adu, opts.gain_e_per_adu, opts.noise_step
+        opts.offset_adu,
+        opts.gain_e_per_adu,
+        opts.noise_step
     );
     Ok(())
 }
@@ -1241,8 +1049,8 @@ fn encode_streaming(
     let d = info.layout.dims;
     let chunk_z = writer.chunk_depth();
     let chunk_count = (d.t as u64) * (d.c as u64) * d.z.div_ceil(chunk_z) as u64;
-    println!("Streaming layout: {} chunk(s), up to {} Z plane(s) per chunk; input has {} physical / {} logical TIFF plane(s).",chunk_count,chunk_z,info.physical_pages,info.logical_pages);
-    println!("Reading first chunk...");
+    report!("Streaming layout: {} chunk(s), up to {} Z plane(s) per chunk; input has {} physical / {} logical TIFF plane(s).",chunk_count,chunk_z,info.physical_pages,info.logical_pages);
+    report!("Reading first chunk...");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
     let start = Instant::now();
     let mut last_progress = Instant::now();
@@ -1251,7 +1059,7 @@ fn encode_streaming(
      -> Result<(), String> {
         if force || last_progress.elapsed().as_secs_f64() >= 1.0 {
             let elapsed = start.elapsed().as_secs_f64();
-            println!("  chunk {}/{} ({:.1}%)  raw {:.3} GiB  elapsed {:.1} s  {:.3} GB/s including TIFF I/O",
+            report!("  chunk {}/{} ({:.1}%)  raw {:.3} GiB  elapsed {:.1} s  {:.3} GB/s including TIFF I/O",
                 writer.chunks_written(),chunk_count,100.*writer.chunks_written() as f64/chunk_count as f64,
                 (writer.raw_bytes_written() / 2 * info.sample_bytes) as f64/(1024.*1024.*1024.),elapsed,gb_per_s(writer.raw_bytes_written() / 2 * info.sample_bytes,elapsed));
             std::io::stdout().flush().map_err(|e| e.to_string())?;
@@ -1307,29 +1115,37 @@ fn encode_streaming(
     } // The TIFF reader is joined before metadata capture or publication.
     writer.flush_pending()?;
     report(&writer, true)?;
-    println!("Saving TIFF metadata...");
+    report!("Saving TIFF metadata...");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
     writer.set_metadata(tiff_metadata::capture(input, &info.layout)?)?;
-    writer.finish()?;
+    if FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+        writer.finish()?;
+    } else {
+        writer.finish_no_replace()?;
+    }
     let total = fs::metadata(output).map_err(|e| e.to_string())?.len() as usize;
     let secs = start.elapsed().as_secs_f64();
-    println!("Wrote {} ({:.3} MiB)", output.display(), mib(total));
-    println!(
+    report!("Wrote {} ({:.3} MiB)", output.display(), mib(total));
+    report!(
         "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
-        d.t, d.c, d.z, d.y, d.x
+        d.t,
+        d.c,
+        d.z,
+        d.y,
+        d.x
     );
-    println!(
+    report!(
         "Out-of-core chunks: {} (up to {} Z planes each)",
         writer.chunks_written(),
         chunk_z
     );
-    println!("RAM budget:       {} MiB", ds.memory_mib);
-    println!("Payload bytes:    {:.3} MiB", mib(writer.payload_bytes()));
-    println!(
+    report!("RAM budget:       {} MiB", ds.memory_mib);
+    report!("Payload bytes:    {:.3} MiB", mib(writer.payload_bytes()));
+    report!(
         "Compression ratio:{:.2}:1",
         (writer.raw_bytes_written() / 2 * info.sample_bytes) as f64 / total.max(1) as f64
     );
-    println!(
+    report!(
         "Encode rate:      {:.3} GB/s (TIFF I/O included)",
         gb_per_s(writer.raw_bytes_written() / 2 * info.sample_bytes, secs)
     );
@@ -1390,7 +1206,7 @@ fn write_encoded_with_metadata(
         .map_err(|e| e.to_string())?;
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
-    pending.publish().map_err(|e| e.to_string())?;
+    publish_output(&mut pending)?;
     Ok(written)
 }
 
@@ -1431,39 +1247,21 @@ fn measure<T>(
     Ok((result.unwrap(), median))
 }
 
-fn benchmark_args(args: &[String]) -> Result<(Vec<String>, usize), String> {
-    let mut codec = Vec::new();
-    let mut repeats = 3;
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--repeats" {
-            i += 1;
-            repeats = args
-                .get(i)
-                .and_then(|v| v.parse::<usize>().ok())
-                .filter(|&n| n > 0)
-                .ok_or("--repeats requires a positive integer")?;
-        } else if args[i] == "--stream" || args[i] == "--memory-mib" {
-            return Err("benchmarks run in memory; streaming options are not supported".into());
-        } else {
-            codec.push(args[i].clone());
-        }
-        i += 1;
-    }
-    Ok((codec, repeats))
-}
-
 fn print_shape(layout: &ResolvedLayout) {
     let d = layout.dims;
-    println!(
+    report!(
         "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
-        d.t, d.c, d.z, d.y, d.x
+        d.t,
+        d.c,
+        d.z,
+        d.y,
+        d.x
     );
-    println!("Layout source:   {}", layout.source);
+    report!("Layout source:   {}", layout.source);
     if layout.ifd_coords.is_some() {
-        println!("Input mapping:   explicit OME TiffData IFD mapping");
+        report!("Input mapping:   explicit OME TiffData IFD mapping");
     } else {
-        println!(
+        report!(
             "Input page order: {} (slowest -> fastest)",
             layout.page_order
         );
@@ -1475,35 +1273,35 @@ fn benchmark(path: &Path, opts: Options, ds: DatasetArgs, repeats: usize) -> Res
     let (data, layout) = load_dataset(path, &ds)?;
     let dims = layout.dims;
     let raw_bytes = data.len() * inspect_streaming_dataset(path, &ds)?.sample_bytes;
-    println!("Input:           {}", path.display());
-    println!("Codec options:   {opts:?}");
-    println!(
+    report!("Input:           {}", path.display());
+    report!("Codec options:   {opts:?}");
+    report!(
         "Timing:          median of {repeats} runs after warm-up, {} workers",
         rayon::current_num_threads()
     );
     print_shape(&layout);
-    println!("Raw bytes:       {:.3} MiB", mib(raw_bytes));
-    println!("TIFF read/map:   {:.3} s", io0.elapsed().as_secs_f64());
-    println!();
+    report!("Raw bytes:       {:.3} MiB", mib(raw_bytes));
+    report!("TIFF read/map:   {:.3} s", io0.elapsed().as_secs_f64());
+    report!();
 
     let ((encoded, stats), encode_time) = measure(repeats, || {
         compress_u16_nd_with_stats(&data, dims, opts).map_err(|e| e.to_string())
     })?;
-    println!("Lossless compression:");
-    println!("  volumes (T*C): {}", stats.volumes);
-    println!("  q max:         {}", stats.q_max);
-    println!("  r max:         {}", stats.r_max);
-    println!("  blocks:        {}", stats.blocks);
-    println!("  q stream:      {:.3} MiB", mib(stats.q_stream_bytes));
-    println!("  r stream:      {:.3} MiB", mib(stats.r_stream_bytes));
-    println!("  model tables:  {:.3} MiB", mib(stats.model_bytes));
-    println!("  total file:    {:.3} MiB", mib(stats.total_bytes));
-    println!(
+    report!("Lossless compression:");
+    report!("  volumes (T*C): {}", stats.volumes);
+    report!("  q max:         {}", stats.q_max);
+    report!("  r max:         {}", stats.r_max);
+    report!("  blocks:        {}", stats.blocks);
+    report!("  q stream:      {:.3} MiB", mib(stats.q_stream_bytes));
+    report!("  r stream:      {:.3} MiB", mib(stats.r_stream_bytes));
+    report!("  model tables:  {:.3} MiB", mib(stats.model_bytes));
+    report!("  total file:    {:.3} MiB", mib(stats.total_bytes));
+    report!(
         "  ratio:         {:.2}:1",
         raw_bytes as f64 / stats.total_bytes as f64
     );
-    println!("  encode time:   {:.4} s", encode_time);
-    println!(
+    report!("  encode time:   {:.4} s", encode_time);
+    report!(
         "  encode rate:   {:.3} GB/s",
         gb_per_s(raw_bytes, encode_time)
     );
@@ -1515,11 +1313,11 @@ fn benchmark(path: &Path, opts: Options, ds: DatasetArgs, repeats: usize) -> Res
     if dd != dims || decoded != data {
         return Err("round-trip verification FAILED".into());
     }
-    println!();
-    println!("Decompression:");
-    println!("  decode time:   {:.4} s", ds_time);
-    println!("  decode rate:   {:.3} GB/s", gb_per_s(raw_bytes, ds_time));
-    println!("  exact:         yes");
+    report!();
+    report!("Decompression:");
+    report!("  decode time:   {:.4} s", ds_time);
+    report!("  decode rate:   {:.3} GB/s", gb_per_s(raw_bytes, ds_time));
+    report!("  exact:         yes");
     Ok(())
 }
 
@@ -1552,42 +1350,42 @@ fn benchmark_lossy(
     let (data, layout) = load_dataset(path, &ds)?;
     let dims = layout.dims;
     let raw_bytes = data.len() * inspect_streaming_dataset(path, &ds)?.sample_bytes;
-    println!("Input:           {}", path.display());
-    println!("Codec options:   {opts:?}");
-    println!(
+    report!("Input:           {}", path.display());
+    report!("Codec options:   {opts:?}");
+    report!(
         "Timing:          median of {repeats} runs after warm-up, {} workers",
         rayon::current_num_threads()
     );
     print_shape(&layout);
-    println!("Raw bytes:       {:.3} MiB", mib(raw_bytes));
-    println!("TIFF read/map:   {:.3} s", io0.elapsed().as_secs_f64());
-    println!();
-    println!("Lossy calibration:");
-    println!("  offset:        {:.6} ADU", opts.offset_adu);
-    println!("  gain:          {:.6} e-/ADU", opts.gain_e_per_adu);
-    println!("  noise step:    {:.6}", opts.noise_step);
-    println!(
+    report!("Raw bytes:       {:.3} MiB", mib(raw_bytes));
+    report!("TIFF read/map:   {:.3} s", io0.elapsed().as_secs_f64());
+    report!();
+    report!("Lossy calibration:");
+    report!("  offset:        {:.6} ADU", opts.offset_adu);
+    report!("  gain:          {:.6} e-/ADU", opts.gain_e_per_adu);
+    report!("  noise step:    {:.6}", opts.noise_step);
+    report!(
         "  quant RMS*:    {:.4} sigma",
         opts.noise_step / 12.0f64.sqrt()
     );
-    println!();
+    report!();
 
     let ((encoded, stats), encode_time) = measure(repeats, || {
         compress_lossy_u16_nd_with_stats(&data, dims, opts).map_err(|e| e.to_string())
     })?;
-    println!("Lossy compression:");
-    println!("  volumes (T*C): {}", stats.volumes);
-    println!("  q max:         {}", stats.q_max);
-    println!("  blocks:        {}", stats.blocks);
-    println!("  q stream:      {:.3} MiB", mib(stats.q_stream_bytes));
-    println!("  model tables:  {:.3} MiB", mib(stats.model_bytes));
-    println!("  total file:    {:.3} MiB", mib(stats.total_bytes));
-    println!(
+    report!("Lossy compression:");
+    report!("  volumes (T*C): {}", stats.volumes);
+    report!("  q max:         {}", stats.q_max);
+    report!("  blocks:        {}", stats.blocks);
+    report!("  q stream:      {:.3} MiB", mib(stats.q_stream_bytes));
+    report!("  model tables:  {:.3} MiB", mib(stats.model_bytes));
+    report!("  total file:    {:.3} MiB", mib(stats.total_bytes));
+    report!(
         "  ratio:         {:.2}:1",
         raw_bytes as f64 / stats.total_bytes as f64
     );
-    println!("  encode time:   {:.4} s", encode_time);
-    println!(
+    report!("  encode time:   {:.4} s", encode_time);
+    report!(
         "  encode rate:   {:.3} GB/s",
         gb_per_s(raw_bytes, encode_time)
     );
@@ -1600,59 +1398,14 @@ fn benchmark_lossy(
         return Err("lossy decoded dimensions do not match".into());
     }
     let (rmse, mae, max_abs, rmse_e) = error_stats(&data, &decoded, opts);
-    println!();
-    println!("Decompression:");
-    println!("  decode time:   {:.4} s", ds_time);
-    println!("  decode rate:   {:.3} GB/s", gb_per_s(raw_bytes, ds_time));
-    println!("  RMSE:          {:.4} ADU", rmse);
-    println!("  MAE:           {:.4} ADU", mae);
-    println!("  max abs error: {} ADU", max_abs);
-    println!("  RMSE signal:   {:.4} electrons", rmse_e);
-    Ok(())
-}
-
-fn parse_decode_options(args: &[String]) -> Result<(Option<String>, usize), String> {
-    let mut order = None;
-    let mut memory = DEFAULT_STREAM_MEMORY_MIB;
-    if !args.len().is_multiple_of(2) {
-        return Err("decode options need values".into());
-    }
-    for pair in args.as_chunks::<2>().0 {
-        match pair[0].as_str() {
-            "--page-order" => {
-                let value = pair[1].to_ascii_uppercase();
-                validate_page_order(&value)?;
-                order = Some(value);
-            }
-            "--memory-mib" => {
-                memory = pair[1]
-                    .parse::<usize>()
-                    .map_err(|_| "--memory-mib requires a positive integer")?;
-                if memory == 0 {
-                    return Err("--memory-mib requires a positive integer".into());
-                }
-            }
-            _ => return Err(format!("unknown decode option: {}", pair[0])),
-        }
-    }
-    Ok((order, memory))
-}
-
-fn configure_metadata_limit(args: &mut Vec<String>) -> Result<(), String> {
-    let mut i = 2;
-    while i < args.len() {
-        if args[i] == "--metadata-limit-mib" {
-            let bytes = args
-                .get(i + 1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .and_then(|mib| mib.checked_mul(1024 * 1024))
-                .ok_or("--metadata-limit-mib requires a nonnegative integer that fits in bytes")?;
-            radelta_native::set_metadata_limit(bytes);
-            args.drain(i..i + 2);
-        } else {
-            i += 1;
-        }
-    }
+    report!();
+    report!("Decompression:");
+    report!("  decode time:   {:.4} s", ds_time);
+    report!("  decode rate:   {:.3} GB/s", gb_per_s(raw_bytes, ds_time));
+    report!("  RMSE:          {:.4} ADU", rmse);
+    report!("  MAE:           {:.4} ADU", mae);
+    report!("  max abs error: {} ADU", max_abs);
+    report!("  RMSE signal:   {:.4} electrons", rmse_e);
     Ok(())
 }
 
@@ -1666,229 +1419,358 @@ fn tiff_limits() -> tiff::decoder::Limits {
 }
 
 fn main() {
-    let mut args: Vec<String> = env::args().collect();
-    if let Err(e) = configure_metadata_limit(&mut args) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
-    if args.len() < 3 {
-        usage();
-    }
-    if matches!(args[1].as_str(), "encode" | "encode-lossy" | "decode") && args.len() >= 4 {
-        if let Err(e) =
-            radelta_native::output::ensure_distinct(Path::new(&args[2]), Path::new(&args[3]))
-        {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    }
-    let result = match args[1].as_str() {
-        "benchmark" | "benchmark-lossy" => {
-            benchmark_args(&args[3..]).and_then(|(codec_args, repeats)| {
-                if args[1] == "benchmark" {
-                    let (opts, ds) = parse_lossless_args(&codec_args);
-                    benchmark(Path::new(&args[2]), opts, ds, repeats)
-                } else {
-                    let (opts, ds) = parse_lossy_args(&codec_args);
-                    benchmark_lossy(Path::new(&args[2]), opts, ds, repeats)
-                }
-            })
-        }
-        "encode" => {
-            if args.len() < 4 {
-                usage();
-            }
-            let (opts, ds) = parse_lossless_args(&args[4..]);
-            let input = Path::new(&args[2]);
-            let output = Path::new(&args[3]);
-            match inspect_streaming_dataset(input, &ds) {
-                Ok(info) => {
-                    let d = info.layout.dims;
-                    let raw =
-                        d.x.checked_mul(d.y)
-                            .and_then(|v| v.checked_mul(d.z))
-                            .and_then(|v| v.checked_mul(d.c))
-                            .and_then(|v| v.checked_mul(d.t))
-                            .and_then(|v| v.checked_mul(2))
-                            .ok_or_else(|| "dataset size overflow".to_string());
-                    match raw {
-                        Ok(raw_bytes) => {
-                            let budget = ds.memory_mib.saturating_mul(1024 * 1024);
-                            let use_stream =
-                                ds.force_stream || raw_bytes.saturating_mul(4) > budget;
-                            if use_stream {
-                                println!("Using out-of-core RDS3 encoding (estimated in-memory working set exceeds {} MiB).", ds.memory_mib);
-                                encode_streaming_lossless(input, output, opts, &ds, &info)
-                            } else {
-                                match load_dataset(input, &ds) {
-                                    Ok((data, layout)) => {
-                                        let dims = layout.dims;
-                                        match compress_u16_nd_with_stats(&data, dims, opts) {
-                                            Ok((encoded, stats)) => {
-                                                match write_encoded_with_metadata(
-                                                    input, output, &encoded, &layout,
-                                                ) {
-                                                    Err(e) => Err(e),
-                                                    Ok(written) => {
-                                                        println!(
-                                                            "Wrote {} ({:.3} MiB)",
-                                                            output.display(),
-                                                            mib(written)
-                                                        );
-                                                        println!(
-                                                            "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
-                                                            dims.t, dims.c, dims.z, dims.y, dims.x
-                                                        );
-                                                        println!(
-                                                            "Layout source: {}",
-                                                            layout.source
-                                                        );
-                                                        println!(
-                                                            "Lossless encode rate: {:.3} GB/s",
-                                                            gb_per_s(
-                                                                stats.raw_bytes / 2
-                                                                    * info.sample_bytes,
-                                                                stats.seconds_total
-                                                            )
-                                                        );
-                                                        Ok(())
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => Err(e.to_string()),
-                                        }
-                                    }
-                                    Err(e) => Err(e),
-                                }
-                            }
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
-                Err(e) => Err(e),
-            }
-        }
-        "encode-lossy" => {
-            if args.len() < 4 {
-                usage();
-            }
-            let (opts, ds) = parse_lossy_args(&args[4..]);
-            let input = Path::new(&args[2]);
-            let output = Path::new(&args[3]);
-            match inspect_streaming_dataset(input, &ds) {
-                Ok(info) => {
-                    let d = info.layout.dims;
-                    let raw =
-                        d.x.checked_mul(d.y)
-                            .and_then(|v| v.checked_mul(d.z))
-                            .and_then(|v| v.checked_mul(d.c))
-                            .and_then(|v| v.checked_mul(d.t))
-                            .and_then(|v| v.checked_mul(2))
-                            .ok_or_else(|| "dataset size overflow".to_string());
-                    match raw {
-                        Ok(raw_bytes) => {
-                            let budget = ds.memory_mib.saturating_mul(1024 * 1024);
-                            let use_stream =
-                                ds.force_stream || raw_bytes.saturating_mul(4) > budget;
-                            if use_stream {
-                                println!("Using out-of-core RQS3 encoding (estimated in-memory working set exceeds {} MiB).", ds.memory_mib);
-                                encode_streaming_lossy(input, output, opts, &ds, &info)
-                            } else {
-                                match load_dataset(input, &ds) {
-                                    Ok((data, layout)) => {
-                                        let dims = layout.dims;
-                                        match compress_lossy_u16_nd_with_stats(&data, dims, opts) {
-                                            Ok((encoded, stats)) => {
-                                                match write_encoded_with_metadata(
-                                                    input, output, &encoded, &layout,
-                                                ) {
-                                                    Err(e) => Err(e),
-                                                    Ok(written) => {
-                                                        println!(
-                                                            "Wrote {} ({:.3} MiB)",
-                                                            output.display(),
-                                                            mib(written)
-                                                        );
-                                                        println!(
-                                                            "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
-                                                            dims.t, dims.c, dims.z, dims.y, dims.x
-                                                        );
-                                                        println!(
-                                                            "Layout source: {}",
-                                                            layout.source
-                                                        );
-                                                        println!(
-                                                            "Lossy encode rate: {:.3} GB/s",
-                                                            gb_per_s(
-                                                                stats.raw_bytes / 2
-                                                                    * info.sample_bytes,
-                                                                stats.seconds_total
-                                                            )
-                                                        );
-                                                        println!("offset={:.6} ADU, gain={:.6} e-/ADU, noise-step={:.6}", opts.offset_adu, opts.gain_e_per_adu, opts.noise_step);
-                                                        Ok(())
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => Err(e.to_string()),
-                                        }
-                                    }
-                                    Err(e) => Err(e),
-                                }
-                            }
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
-                Err(e) => Err(e),
-            }
-        }
-        "decode" => {
-            if args.len() < 4 {
-                usage();
-            }
-            let (order, memory_mib) = parse_decode_options(&args[4..]).unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                std::process::exit(1)
-            });
-            let input = Path::new(&args[2]);
-            let output = Path::new(&args[3]);
-            radelta_native::RadeltaFileHandle::open(input).and_then(|file| {
-                let info = file.info();
-                let d = Dims5 {
-                    x: info.nx as usize,
-                    y: info.ny as usize,
-                    z: info.nz as usize,
-                    c: info.nc as usize,
-                    t: info.nt as usize,
-                };
-                let (mut pending, reserved) = radelta_native::output::PendingOutput::create(output)
-                    .map_err(|e| e.to_string())?;
-                drop(reserved);
-                let metadata_len = file.metadata().len();
-                tiff_export::write(
-                    std::sync::Arc::new(file),
-                    d,
-                    order.as_deref(),
-                    memory_mib,
-                    pending.path(),
-                )?;
-                pending.publish().map_err(|e| e.to_string())?;
-                println!("Wrote {}", output.display());
-                println!(
-                    "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
-                    d.t, d.c, d.z, d.y, d.x
-                );
-                println!("Metadata: {} bytes", metadata_len);
-                Ok(())
-            })
-        }
-        _ => usage(),
+    let cli = cli::Cli::parse();
+    QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
+    FORCE.store(cli.force, std::sync::atomic::Ordering::Relaxed);
+    radelta_native::set_metadata_limit(cli.metadata_limit_mib * 1024 * 1024);
+    let result = if let Some(threads) = cli.threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|e| format!("cannot create codec worker pool: {e}"))
+            .and_then(|pool| pool.install(|| run_command(cli.command)))
+    } else {
+        run_command(cli.command)
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn dataset(layout: cli::LayoutArgs, memory_mib: usize, force_stream: bool) -> DatasetArgs {
+    DatasetArgs {
+        t: layout.t,
+        c: layout.c,
+        z: layout.z,
+        page_order: layout.page_order,
+        ignore_metadata: layout.ignore_metadata,
+        memory_mib,
+        force_stream,
+    }
+}
+
+fn run_command(command: cli::Command) -> Result<(), String> {
+    use cli::Command::*;
+    match command {
+        Encode(args) => {
+            let (input, output) = args.paths.resolve("rdlt");
+            prepare_conversion(&input, &output)?;
+            encode_lossless(
+                &input,
+                &output,
+                args.codec.options(),
+                dataset(args.layout, args.memory.memory_mib, args.stream),
+            )
+            .map_err(|e| {
+                format!(
+                    "cannot encode '{}' to '{}': {e}",
+                    input.display(),
+                    output.display()
+                )
+            })
+        }
+        EncodeLossy(args) => {
+            let opts = args.calibration.options(&args.encode.codec);
+            let args = args.encode;
+            let (input, output) = args.paths.resolve("lossy.rdlt");
+            prepare_conversion(&input, &output)?;
+            encode_lossy(
+                &input,
+                &output,
+                opts,
+                dataset(args.layout, args.memory.memory_mib, args.stream),
+            )
+            .map_err(|e| {
+                format!(
+                    "cannot encode '{}' to '{}': {e}",
+                    input.display(),
+                    output.display()
+                )
+            })
+        }
+        Decode(args) => {
+            let (input, output) = args.paths.resolve("tif");
+            prepare_conversion(&input, &output)?;
+            decode_file(&input, &output, args.page_order, args.memory.memory_mib).map_err(|e| {
+                format!(
+                    "cannot decode '{}' to '{}': {e}",
+                    input.display(),
+                    output.display()
+                )
+            })
+        }
+        Benchmark(args) => benchmark(
+            &args.input,
+            args.codec.options(),
+            dataset(args.layout, DEFAULT_STREAM_MEMORY_MIB, false),
+            args.repeats,
+        )
+        .map_err(|e| format!("cannot benchmark '{}': {e}", args.input.display())),
+        BenchmarkLossy(args) => {
+            let opts = args.calibration.options(&args.benchmark.codec);
+            let args = args.benchmark;
+            benchmark_lossy(
+                &args.input,
+                opts,
+                dataset(args.layout, DEFAULT_STREAM_MEMORY_MIB, false),
+                args.repeats,
+            )
+            .map_err(|e| format!("cannot benchmark '{}': {e}", args.input.display()))
+        }
+    }
+}
+
+fn prepare_conversion(input: &Path, output: &Path) -> Result<(), String> {
+    let metadata =
+        fs::metadata(input).map_err(|e| format!("cannot read input '{}': {e}", input.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("input '{}' is not a file", input.display()));
+    }
+    radelta_native::output::ensure_distinct(input, output)
+        .map_err(|e| format!("output '{}': {e}", output.display()))?;
+    // symlink_metadata also catches dangling output symlinks.
+    match fs::symlink_metadata(output) {
+        Ok(m) if m.is_dir() => {
+            return Err(format!(
+                "output '{}' is a directory; specify a filename",
+                output.display()
+            ))
+        }
+        Ok(_) if !FORCE.load(std::sync::atomic::Ordering::Relaxed) => {
+            return Err(format!(
+                "output '{}' already exists; use --force to replace it or choose another output",
+                output.display()
+            ))
+        }
+        Ok(_) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(format!("cannot access output '{}': {e}", output.display())),
+    }
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.is_dir() {
+        return Err(format!(
+            "output directory '{}' does not exist or is inaccessible",
+            parent.display()
+        ));
+    }
+    Ok(())
+}
+
+fn publish_output(pending: &mut radelta_native::output::PendingOutput) -> Result<(), String> {
+    if FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+        pending.publish()
+    } else {
+        pending.publish_no_replace()
+    }
+    .map_err(|e| e.to_string())
+}
+
+fn encode_lossless(
+    input: &Path,
+    output: &Path,
+    opts: Options,
+    ds: DatasetArgs,
+) -> Result<(), String> {
+    match inspect_streaming_dataset(input, &ds) {
+        Ok(info) => {
+            let d = info.layout.dims;
+            let raw =
+                d.x.checked_mul(d.y)
+                    .and_then(|v| v.checked_mul(d.z))
+                    .and_then(|v| v.checked_mul(d.c))
+                    .and_then(|v| v.checked_mul(d.t))
+                    .and_then(|v| v.checked_mul(2))
+                    .ok_or_else(|| "dataset size overflow".to_string());
+            match raw {
+                Ok(raw_bytes) => {
+                    let budget = ds.memory_mib.saturating_mul(1024 * 1024);
+                    let use_stream = ds.force_stream || raw_bytes.saturating_mul(4) > budget;
+                    if use_stream {
+                        report!(
+                            "Using out-of-core RDS3 encoding ({}; RAM allowance {} MiB).",
+                            if ds.force_stream {
+                                "requested with --stream"
+                            } else {
+                                "estimated working set exceeds allowance"
+                            },
+                            ds.memory_mib
+                        );
+                        encode_streaming_lossless(input, output, opts, &ds, &info)
+                    } else {
+                        match load_dataset(input, &ds) {
+                            Ok((data, layout)) => {
+                                let dims = layout.dims;
+                                match compress_u16_nd_with_stats(&data, dims, opts) {
+                                    Ok((encoded, stats)) => {
+                                        match write_encoded_with_metadata(
+                                            input, output, &encoded, &layout,
+                                        ) {
+                                            Err(e) => Err(e),
+                                            Ok(written) => {
+                                                report!(
+                                                    "Wrote {} ({:.3} MiB)",
+                                                    output.display(),
+                                                    mib(written)
+                                                );
+                                                report!(
+                                                    "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
+                                                    dims.t,
+                                                    dims.c,
+                                                    dims.z,
+                                                    dims.y,
+                                                    dims.x
+                                                );
+                                                report!("Layout source: {}", layout.source);
+                                                report!(
+                                                    "Lossless encode rate: {:.3} GB/s",
+                                                    gb_per_s(
+                                                        stats.raw_bytes / 2 * info.sample_bytes,
+                                                        stats.seconds_total
+                                                    )
+                                                );
+                                                Ok(())
+                                            }
+                                        }
+                                    }
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn encode_lossy(
+    input: &Path,
+    output: &Path,
+    opts: LossyOptions,
+    ds: DatasetArgs,
+) -> Result<(), String> {
+    match inspect_streaming_dataset(input, &ds) {
+        Ok(info) => {
+            let d = info.layout.dims;
+            let raw =
+                d.x.checked_mul(d.y)
+                    .and_then(|v| v.checked_mul(d.z))
+                    .and_then(|v| v.checked_mul(d.c))
+                    .and_then(|v| v.checked_mul(d.t))
+                    .and_then(|v| v.checked_mul(2))
+                    .ok_or_else(|| "dataset size overflow".to_string());
+            match raw {
+                Ok(raw_bytes) => {
+                    let budget = ds.memory_mib.saturating_mul(1024 * 1024);
+                    let use_stream = ds.force_stream || raw_bytes.saturating_mul(4) > budget;
+                    if use_stream {
+                        report!(
+                            "Using out-of-core RQS3 encoding ({}; RAM allowance {} MiB).",
+                            if ds.force_stream {
+                                "requested with --stream"
+                            } else {
+                                "estimated working set exceeds allowance"
+                            },
+                            ds.memory_mib
+                        );
+                        encode_streaming_lossy(input, output, opts, &ds, &info)
+                    } else {
+                        match load_dataset(input, &ds) {
+                            Ok((data, layout)) => {
+                                let dims = layout.dims;
+                                match compress_lossy_u16_nd_with_stats(&data, dims, opts) {
+                                    Ok((encoded, stats)) => {
+                                        match write_encoded_with_metadata(
+                                            input, output, &encoded, &layout,
+                                        ) {
+                                            Err(e) => Err(e),
+                                            Ok(written) => {
+                                                report!(
+                                                    "Wrote {} ({:.3} MiB)",
+                                                    output.display(),
+                                                    mib(written)
+                                                );
+                                                report!(
+                                                    "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
+                                                    dims.t,
+                                                    dims.c,
+                                                    dims.z,
+                                                    dims.y,
+                                                    dims.x
+                                                );
+                                                report!("Layout source: {}", layout.source);
+                                                report!(
+                                                    "Lossy encode rate: {:.3} GB/s",
+                                                    gb_per_s(
+                                                        stats.raw_bytes / 2 * info.sample_bytes,
+                                                        stats.seconds_total
+                                                    )
+                                                );
+                                                report!("offset={:.6} ADU, gain={:.6} e-/ADU, noise-step={:.6}", opts.offset_adu, opts.gain_e_per_adu, opts.noise_step);
+                                                Ok(())
+                                            }
+                                        }
+                                    }
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn decode_file(
+    input: &Path,
+    output: &Path,
+    order: Option<String>,
+    memory_mib: usize,
+) -> Result<(), String> {
+    radelta_native::RadeltaFileHandle::open(input).and_then(|file| {
+        let info = file.info();
+        let d = Dims5 {
+            x: info.nx as usize,
+            y: info.ny as usize,
+            z: info.nz as usize,
+            c: info.nc as usize,
+            t: info.nt as usize,
+        };
+        let (mut pending, reserved) =
+            radelta_native::output::PendingOutput::create(output).map_err(|e| e.to_string())?;
+        drop(reserved);
+        let metadata_len = file.metadata().len();
+        tiff_export::write(
+            std::sync::Arc::new(file),
+            d,
+            order.as_deref(),
+            memory_mib,
+            pending.path(),
+        )?;
+        publish_output(&mut pending)?;
+        report!("Wrote {}", output.display());
+        report!(
+            "Shape T,C,Z,Y,X: {}, {}, {}, {}, {}",
+            d.t,
+            d.c,
+            d.z,
+            d.y,
+            d.x
+        );
+        report!("Metadata: {} bytes", metadata_len);
+        Ok(())
+    })
 }
 
 #[cfg(test)]

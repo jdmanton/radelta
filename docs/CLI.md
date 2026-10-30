@@ -1,22 +1,69 @@
 # Radelta command-line interface
 
-The executable is named `radelta` (`radelta.exe` on Windows). It reads 16-bit grayscale TIFF data and writes Radelta files, or decodes Radelta files back to TIFF/BigTIFF.
+The executable is named `radelta` (`radelta.exe` on Windows). It reads unsigned 8-bit or 16-bit grayscale TIFF data and writes Radelta files, or decodes Radelta files back to TIFF/BigTIFF.
 
 ## Commands
 
 ```text
-radelta encode INPUT.tif OUTPUT.rdlt [options]
-radelta encode-lossy INPUT.tif OUTPUT.rdlt --offset-adu O (--gain-e-per-adu G | --gain-adu-per-e G) [options]
-radelta decode INPUT.rdlt OUTPUT.tif [--page-order TCZ] [--memory-mib N]
+radelta encode INPUT.tif [OUTPUT.rdlt] [options]
+radelta encode-lossy INPUT.tif [OUTPUT.rdlt] --offset-adu O (--gain-e-per-adu G | --gain-adu-per-e G) [options]
+radelta decode INPUT.rdlt [OUTPUT.tif] [--page-order TCZ] [--memory-mib N]
 radelta benchmark INPUT.tif [--repeats N] [options]
 radelta benchmark-lossy INPUT.tif --offset-adu O (--gain-e-per-adu G | --gain-adu-per-e G) [--repeats N] [options]
 ```
 
-Running `radelta` without sufficient arguments prints the command syntax.
+Use `radelta --help` for the command list and `radelta encode --help` (or
+`radelta help encode`) for command-specific help. Help and `--version` exit
+successfully. Running without a command prints help and exits with status 2.
+
+Options may appear before or after filenames; `--option=value` is supported.
+Use `-o OUTPUT` or `--output OUTPUT` instead of a positional output path, but
+not both. Quote filenames containing spaces. Use `--` before a filename that
+begins with `-`, for example `radelta encode -- -stack.tif`.
+
+When output is omitted, `encode` changes the input extension to `.rdlt`,
+`encode-lossy` to `.lossy.rdlt`, and `decode` to `.tif`. If a browser-created
+filename already ends in `.tif.rdlt` or `.tiff.rdlt`, decoding removes just the
+final `.rdlt`. Input files are always retained. Existing output files, including
+symlinks, are rejected unless `--force` (or `-f`) is supplied. Input/output
+aliases are rejected even with `--force`.
+
+```bash
+radelta encode stack.tif                   # writes stack.rdlt
+radelta encode --threads 8 stack.tif -o archive.rdlt
+radelta decode archive.rdlt restored.tif
+radelta encode stack.tif --force --quiet   # deliberately replace stack.rdlt
+```
+
+Global options can appear before or after a command:
+
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `--threads N`, `-j N` | positive number of codec workers | `RAYON_NUM_THREADS`, otherwise available CPUs |
+| `--quiet`, `-q` | suppress progress and success messages; errors remain visible | off |
+| `--force`, `-f` | allow output replacement for conversions | off |
+| `--metadata-limit-mib N` | metadata allowance, separate from image buffers | 1024 MiB |
+| `--version`, `-V` | print release version and exit | |
+
+An explicit `--threads` takes precedence over `RAYON_NUM_THREADS`. Benchmarks
+still print the actual worker count. Output parent directories must already
+exist. `--quiet` is useful in scripts; the CLI never prompts for input.
+
+Exit statuses are **0** for success or requested help/version, **2** for command
+syntax or invalid option values, and **1** for I/O, unsupported data or codec
+errors. Invalid arguments are rejected before opening input files. Unknown
+options name the error and may suggest a close match. Numeric parameters must
+be in range; dimensions, threads, memory and repeats must be positive; camera
+offset must be finite, and gain/noise step must also be greater than zero.
+The two gain conventions are mutually exclusive.
 
 Conversions reject input/output aliases, including symlinks and hard links.
-They write a sibling temporary file and create or replace the destination only
-after pixels and metadata are complete. Failures preserve any previous output.
+They write a sibling temporary file and publish the destination only after
+pixels and metadata are complete. Without `--force`, publication fails if
+another process has created the destination while encoding or decoding was
+running. Atomic no-replace publication uses a hard link on the output
+filesystem; if hard links are unsupported it fails with an error rather than
+falling back to replacement. Use `--force` only when replacement is intended. Failures preserve any previous output.
 Allow disk space for the temporary output alongside an existing destination.
 
 All commands accept `--metadata-limit-mib N` (default **1024 MiB**). This controls
@@ -72,7 +119,7 @@ Codec and dataset layout options apply. Benchmarks run in memory;
 `--stream` and `--memory-mib` are rejected. Use release builds and the same
 input, calibration, context, block depth, precision, and worker count for
 comparisons. The commands print settings and worker count; `RAYON_NUM_THREADS`
-can fix the worker count before launching the process.
+can fix the worker count before launching the process, or pass `--threads N`.
 
 ## Codec options
 
@@ -178,6 +225,10 @@ Large datasets can be written as streaming `RDS3`/`RQS3` files. Streaming is sel
 | `--memory-mib N` | approximate streaming RAM budget (encode/decode) | `2048` MiB |
 | `--stream` | force bounded-memory streaming | off |
 
+Positive memory allowances are used as given; they are not silently raised to
+64 MiB. This remains a working-buffer estimate, so a single oversized chunk or
+volume and metadata can exceed it.
+
 ## Lossy calibration
 
 The calibrated lossy transform is
@@ -204,13 +255,13 @@ but not both. The encoded `q` value must fit in 8 bits.
 
 ## TIFF notes
 
-- Input pages must contain `uint16` samples: one per pixel, or several in
+- Input pages must contain `uint8` or `uint16` samples: one per pixel, or several in
   planar layout, which are read as channels.
 - X and Y may be rectangular but must be consistent throughout a dataset.
 - A single member of a multi-file OME-TIFF acquisition is supported when its
   mapped planes form a complete contiguous TCZ subset. Other files are not
   assembled automatically.
-- Supported contiguous ImageJ/tifffile hyperstacks must be uncompressed, single-sample, 16-bit contiguous data.
+- Supported contiguous ImageJ/tifffile hyperstacks must be uncompressed, single-sample, 8-bit or 16-bit contiguous data.
 - Decoding automatically uses BigTIFF when needed.
 
 ## Metadata preservation
@@ -233,7 +284,7 @@ supplied by a non-TIFF application is also saved in tag 65000. Other per-plane
 tags follow their corresponding pixels. Without source metadata, output uses
 canonical TCZ order and a generated OME description.
 
-TIFF conversion preserves the main grayscale image stack and its uint16,
+TIFF conversion preserves the main grayscale image stack and its uint8/uint16,
 single-sample grayscale SubIFD pyramid levels, including nested levels. Each
 stored reduced-resolution image is compressed losslessly and restored beneath
 its original parent plane; explicit page reordering moves its pyramid with it.

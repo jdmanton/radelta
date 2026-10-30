@@ -17,6 +17,7 @@ fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
 fn encode(root: &Path, input: &Path, name: &str, args: &[&str]) -> Vec<u8> {
     let output = root.join(name);
     let result = Command::new(env!("CARGO_BIN_EXE_radelta"))
+        .arg("--force")
         .arg(args[0])
         .arg(input)
         .arg(&output)
@@ -41,6 +42,7 @@ fn assert_rejected(root: &Path, name: &str, bytes: &[u8]) {
         "{name}: damaged file opened"
     );
     let result = Command::new(env!("CARGO_BIN_EXE_radelta"))
+        .arg("--force")
         .arg("decode")
         .arg(&path)
         .arg(root.join(format!("{name}.tif")))

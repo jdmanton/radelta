@@ -12,6 +12,7 @@ use tiff::{
 
 fn run(args: &[&str]) -> Output {
     let output = Command::new(env!("CARGO_BIN_EXE_radelta"))
+        .arg("--force")
         .args(args)
         .output()
         .unwrap();
@@ -191,6 +192,7 @@ fn invalid_local_ome_mapping_preserves_existing_output() {
     fs::write(&encoded, b"existing result").unwrap();
     for stream in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_radelta"));
+        command.arg("--force");
         command.arg("encode").arg(&input).arg(&encoded);
         if stream {
             command.arg("--stream");

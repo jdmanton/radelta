@@ -58,6 +58,7 @@ fn uint8_classic_big_raw_predictor_and_streaming_preserve_depth_and_mapping() {
             }
             for stream in [false, true] {
                 let mut cmd = Command::new(env!("CARGO_BIN_EXE_radelta"));
+                cmd.arg("--force");
                 cmd.arg("encode").arg(&input).arg(&encoded);
                 if stream {
                     cmd.args(["--stream", "--memory-mib", "1"]);
@@ -70,6 +71,7 @@ fn uint8_classic_big_raw_predictor_and_streaming_preserve_depth_and_mapping() {
                 );
                 for reorder in [false, true] {
                     let mut cmd = Command::new(env!("CARGO_BIN_EXE_radelta"));
+                    cmd.arg("--force");
                     cmd.arg("decode").arg(&encoded).arg(&output);
                     if reorder {
                         cmd.args(["--page-order", "TCZ"]);

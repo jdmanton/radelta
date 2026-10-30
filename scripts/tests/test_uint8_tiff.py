@@ -21,7 +21,8 @@ CLI = os.environ.get("RADELTA_CLI", str(
 @unittest.skipIf(TIFF_SKIP_REASON is not None, TIFF_SKIP_REASON or "")
 class Uint8TiffTests(unittest.TestCase):
     def run_cli(self, *args):
-        result = subprocess.run([CLI, *map(str, args)], capture_output=True)
+        # This integration matrix deliberately reuses its temporary outputs.
+        result = subprocess.run([CLI, "--force", *map(str, args)], capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     @unittest.skipUnless(Path(CLI).is_file(), "Build the CLI or set RADELTA_CLI")

@@ -133,6 +133,7 @@ fn pyramids_keep_nested_pixels_metadata_and_follow_their_parent_when_reordered()
         }
         for streaming in [false, true] {
             let mut cmd = Command::new(env!("CARGO_BIN_EXE_radelta"));
+            cmd.arg("--force");
             cmd.arg("encode").arg(&input).arg(&encoded);
             if streaming {
                 cmd.arg("--stream");
@@ -148,6 +149,7 @@ fn pyramids_keep_nested_pixels_metadata_and_follow_their_parent_when_reordered()
                 .starts_with(b"RDTIFF02"));
             for reorder in [false, true] {
                 let mut cmd = Command::new(env!("CARGO_BIN_EXE_radelta"));
+                cmd.arg("--force");
                 cmd.arg("decode").arg(&encoded).arg(&output);
                 if reorder {
                     cmd.args(["--page-order", "TCZ"]);
@@ -185,6 +187,7 @@ fn pyramids_keep_nested_pixels_metadata_and_follow_their_parent_when_reordered()
     radelta_native::set_file_metadata(&encoded, &metadata).unwrap();
     fs::write(&output, b"keep existing TIFF").unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_radelta"))
+        .arg("--force")
         .arg("decode")
         .arg(&encoded)
         .arg(&output)
@@ -200,6 +203,7 @@ fn pyramids_keep_nested_pixels_metadata_and_follow_their_parent_when_reordered()
     for streaming in [false, true] {
         fs::write(&encoded, b"keep existing output").unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_radelta"));
+        cmd.arg("--force");
         cmd.arg("encode").arg(&input).arg(&encoded);
         if streaming {
             cmd.arg("--stream");

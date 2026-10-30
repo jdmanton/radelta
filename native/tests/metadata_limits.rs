@@ -71,6 +71,7 @@ fn configurable_metadata_limits_cover_memory_files_and_tiff() {
     let restored = dir.join("restored.tif");
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_radelta"))
+            .arg("--force")
             .args(args)
             .output()
             .unwrap()

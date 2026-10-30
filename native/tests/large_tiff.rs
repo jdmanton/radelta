@@ -35,6 +35,7 @@ fn large_compressed_xy_plane_roundtrips_in_memory_and_streaming() {
             "memory.rdlt"
         });
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_radelta"));
+        cmd.arg("--force");
         cmd.arg("encode").arg(&input).arg(&output);
         if streaming {
             cmd.args(["--stream", "--memory-mib", "2048"]);

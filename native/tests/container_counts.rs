@@ -62,6 +62,7 @@ fn tiny_containers_cannot_request_large_indexes_or_abort_c_callers() {
             String::from_utf8_lossy(&child.stderr)
         );
         let cli = Command::new(env!("CARGO_BIN_EXE_radelta"))
+            .arg("--force")
             .arg("decode")
             .arg(&path)
             .arg(root.join("out.tif"))

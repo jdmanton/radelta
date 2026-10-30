@@ -7,5 +7,5 @@ is optional and loaded only for HDF5 paths. NumPy is the only core dependency.
 from ._array import compress, decompress
 from ._file import Dataset, open, read, write
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 __all__ = ["compress", "decompress", "read", "write", "open", "Dataset", "__version__"]

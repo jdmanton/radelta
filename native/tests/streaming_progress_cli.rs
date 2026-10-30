@@ -29,6 +29,7 @@ fn forced_and_automatic_streaming_report_progress_and_preserve_planes() {
         for forced in [false, true] {
             let encoded = root.join(format!("{lossy}-{forced}.rdlt"));
             let mut command = Command::new(env!("CARGO_BIN_EXE_radelta"));
+            command.arg("--force");
             command
                 .arg(if lossy { "encode-lossy" } else { "encode" })
                 .arg(&input)

@@ -20,6 +20,10 @@ import tifffile
 
 
 def run(binary, *args):
+    # These are generated benchmark outputs. Remove them outside the timed
+    # section so both old CLIs and no-overwrite-by-default CLIs can repeat.
+    if args[0] in ("encode", "encode-lossy", "decode"):
+        Path(args[2]).unlink(missing_ok=True)
     start = time.perf_counter()
     result = subprocess.run([str(binary), *map(str, args)], capture_output=True, text=True)
     elapsed = time.perf_counter() - start
