@@ -1,11 +1,19 @@
 //! TIFF adapter for the opaque metadata payload. Pixel layout tags are rebuilt;
 //! descriptive values retain their TIFF type and are stored little-endian.
-use super::*;
+use crate::cli::layout::{
+    coords_from_page_index, infer_layout_from_description, ome_description, validate_page_order,
+    ResolvedLayout,
+};
+use crate::cli::tiff_input::{page_samples, tiff_limits};
+use crate::tiff_io::{self, pixel_buffer};
+use radelta_native::{Dims5, Options};
 use std::borrow::Cow;
-use std::io::Read;
-use tiff::decoder::IfdDecoder;
-use tiff::encoder::{DirectoryEncoder, TiffValue};
-use tiff::tags::{ByteOrder, IfdPointer, Type, ValueBuffer};
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+use tiff::decoder::{Decoder, IfdDecoder};
+use tiff::encoder::{colortype, DirectoryEncoder, TiffEncoder, TiffKind, TiffKindBig, TiffValue};
+use tiff::tags::{ByteOrder, IfdPointer, Tag, Type, ValueBuffer};
 const SIGNATURE: &[u8; 8] = b"RDTIFF01";
 const PYRAMID_SIGNATURE: &[u8; 8] = b"RDTIFF02";
 mod pyramids;

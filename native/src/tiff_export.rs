@@ -307,7 +307,7 @@ pub fn write(
         let mut source = DirectSource {
             file: file.clone(),
             dims: d,
-            pixels: super::pixel_buffer(plane)?,
+            pixels: crate::tiff_io::pixel_buffer(plane)?,
         };
         tiff_metadata::write(path, d, order, file.metadata(), &mut source)
     }

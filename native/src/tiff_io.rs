@@ -6,6 +6,15 @@ use tiff::{
     tags::{ByteOrder, Tag, Type, ValueBuffer},
 };
 
+pub(crate) fn pixel_buffer(samples: usize) -> Result<Vec<u16>, String> {
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(samples)
+        .map_err(|_| "cannot allocate pipeline pixel buffer")?;
+    pixels.resize(samples, 0);
+    Ok(pixels)
+}
+
 pub fn read_u16<R: Read>(reader: &mut R, out: &mut [u16], order: ByteOrder) -> Result<(), String> {
     // SAFETY: u16 has no padding and every bit pattern is valid. The slice is
     // initialized, uniquely borrowed, and the byte view has exactly its size.

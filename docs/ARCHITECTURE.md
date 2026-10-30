@@ -34,7 +34,17 @@ use the types and functions re-exported at the crate root.
 | [`file_api/ffi.rs`](../native/src/file_api/ffi.rs) | File and streaming-writer C ABI |
 | [`ffi.rs`](../native/src/ffi.rs) | In-memory C ABI |
 | [`metadata.rs`](../native/src/metadata.rs) | Application metadata storage |
-| [`main.rs`](../native/src/main.rs) and [`cli.rs`](../native/src/cli.rs) | TIFF conversion, command dispatch and argument parsing |
+| [`main.rs`](../native/src/main.rs) | CLI startup, reporting flags and worker-pool selection |
+| [`cli/mod.rs`](../native/src/cli/mod.rs) | Command dispatch |
+| [`cli/args.rs`](../native/src/cli/args.rs) | Argument parsing, validation and default output names |
+| [`cli/layout.rs`](../native/src/cli/layout.rs) | Dataset dimensions, ImageJ metadata and plane ordering |
+| [`cli/layout/ome.rs`](../native/src/cli/layout/ome.rs) | OME metadata and explicit IFD mappings |
+| [`cli/tiff_input.rs`](../native/src/cli/tiff_input.rs) | TIFF inspection, whole-dataset loading and plane readers |
+| [`cli/convert.rs`](../native/src/cli/convert.rs) | Encoding-mode selection and TIFF restoration |
+| [`cli/streaming.rs`](../native/src/cli/streaming.rs) | Prefetched TIFF input and streaming progress |
+| [`cli/output.rs`](../native/src/cli/output.rs) | Source/output validation and publication policy |
+| [`cli/reporting.rs`](../native/src/cli/reporting.rs) | Shape reports and display units |
+| [`cli/benchmark.rs`](../native/src/cli/benchmark.rs) | In-memory benchmark commands |
 
 Unit tests sit beside the implementation they exercise.
 [`codec/tests.rs`](../native/src/codec/tests.rs) covers stream round trips and
@@ -128,6 +138,13 @@ them in the cache. The exporter controls each buffer's lifetime and accounts
 for it until its last requested plane has been written.
 
 ## TIFF input
+
+The CLI validates arguments before file I/O. Command dispatch passes explicit
+dataset settings to the conversion or benchmark module. Conversion selects
+in-memory or streaming encoding from the requested allowance and inspected
+shape. Both paths use shared layout inference and TIFF sample-reading helpers.
+Output handling checks source aliases and replacement policy before conversion,
+and publishes completed files through `PendingOutput`.
 
 The CLI resolves OME or ImageJ layout metadata into canonical `T,C,Z,Y,X`
 coordinates. Plain stacks default to one timepoint and one channel. Planar

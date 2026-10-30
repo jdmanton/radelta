@@ -306,6 +306,6 @@ fn reciprocal_gain(value: &str) -> Result<f64, String> {
 
 fn page_order(value: &str) -> Result<String, String> {
     let order = value.to_ascii_uppercase();
-    super::validate_page_order(&order)?;
+    super::layout::validate_page_order(&order)?;
     Ok(order)
 }
