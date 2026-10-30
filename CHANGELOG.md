@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.1
+
+- Fix a file-reader deadlock when concurrent single-plane and batched reads
+  share a handle: decode outside the file/cache mutex for every container;
+- Add bounded concurrency regression coverage with one- and two-worker Rayon
+  pools for lossless and lossy reads across all container variants.
+
 ## 0.9.0
 
 - Add unsigned 8-bit TIFF support to in-memory and streaming encoding, including

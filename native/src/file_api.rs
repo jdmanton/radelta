@@ -147,6 +147,7 @@ impl PixelCache {
         }
         self.prepare(bytes);
     }
+    #[cfg(test)]
     fn contains(&self, key: usize) -> bool {
         self.entries.iter().any(|entry| entry.key == key)
     }
@@ -921,86 +922,50 @@ impl RadeltaFileHandle {
         if out.len() < plane {
             return Err("output plane buffer is too small".into());
         }
+        let unit = {
+            let mut backing = self
+                .backing
+                .lock()
+                .map_err(|_| "Radelta file handle mutex is poisoned")?;
+            let unit = decode_unit(&backing, d, t, c, z)?;
+            let cached = match &mut *backing {
+                FileBacking::Single { cache, .. } => cache.as_deref(),
+                FileBacking::Nd { cache, .. } | FileBacking::Stream { cache, .. } => {
+                    cache.note_read(unit.key, z);
+                    cache.get(unit.key)
+                }
+            };
+            if let Some(pixels) = cached {
+                let start = (z - unit.z0) * plane;
+                out[..plane].copy_from_slice(&pixels[start..start + plane]);
+                return Ok(());
+            }
+            if let FileBacking::Nd { cache, .. } | FileBacking::Stream { cache, .. } = &mut *backing
+            {
+                let bytes = plane
+                    .checked_mul(unit.depth)
+                    .and_then(|n| n.checked_mul(std::mem::size_of::<u16>()))
+                    .ok_or("decoded unit size overflow")?;
+                cache.prepare_read(bytes);
+            }
+            unit
+        };
+        // Never hold the backing lock while entering Rayon: a concurrent batch
+        // may occupy its workers waiting for the same lock. decode_pixels locks
+        // only to read the compressed payload, then decodes outside the lock.
+        let pixels = self.decode_pixels(unit)?;
+        let start = (z - unit.z0) * plane;
+        out[..plane].copy_from_slice(&pixels[start..start + plane]);
         let mut backing = self
             .backing
             .lock()
             .map_err(|_| "Radelta file handle mutex is poisoned")?;
         match &mut *backing {
-            FileBacking::Single { file, len, cache } => {
-                if cache.is_none() {
-                    let payload = read_payload(
-                        file,
-                        Segment {
-                            offset: 0,
-                            len: *len,
-                        },
-                    )?;
-                    let pixels = decompress_u16_expecting(&payload, d.volume_dims())
-                        .map_err(|e| e.to_string())?;
-                    *cache = Some(pixels);
-                }
-                let pixels = cache.as_ref().unwrap();
-                let start = z * plane;
-                out[..plane].copy_from_slice(&pixels[start..start + plane]);
-            }
-            FileBacking::Nd {
-                file,
-                streams,
-                cache,
-            } => {
-                let key = t * d.c + c;
-                cache.note_read(key, z);
-                if !cache.contains(key) {
-                    let bytes = plane
-                        .checked_mul(d.z)
-                        .and_then(|n| n.checked_mul(2))
-                        .ok_or("decoded volume size overflow")?;
-                    cache.prepare_read(bytes);
-                    let payload = read_payload(file, streams[key])?;
-                    let pixels = decompress_u16_expecting(&payload, d.volume_dims())
-                        .map_err(|e| format!("RDM2/RDQ2 substream: {e}"))?;
-                    cache.insert(key, pixels);
-                }
-                let pixels = cache.get(key).unwrap();
-                let start = z * plane;
-                out[..plane].copy_from_slice(&pixels[start..start + plane]);
-            }
-            FileBacking::Stream {
-                file,
-                chunks,
-                chunk_z,
-                chunks_per_volume,
-                cache,
-            } => {
-                let key = stream_chunk_key(chunks, *chunk_z, *chunks_per_volume, d, t, c, z)?;
-                let ch = chunks[key];
-                cache.note_read(key, z);
-                if !cache.contains(key) {
-                    let bytes = plane
-                        .checked_mul(ch.depth)
-                        .and_then(|n| n.checked_mul(2))
-                        .ok_or("decoded chunk size overflow")?;
-                    cache.prepare_read(bytes);
-                    let payload = read_payload(
-                        file,
-                        Segment {
-                            offset: ch.offset,
-                            len: ch.len,
-                        },
-                    )?;
-                    let expected = Dims {
-                        x: d.x,
-                        y: d.y,
-                        z: ch.depth,
-                    };
-                    let pixels = decompress_u16_expecting(&payload, expected)
-                        .map_err(|e| format!("RDS3/RQS3 chunk: {e}"))?;
-                    cache.insert(key, pixels);
-                }
-                let pixels = cache.get(key).unwrap();
-                let local_z = z - ch.z0;
-                let start = local_z * plane;
-                out[..plane].copy_from_slice(&pixels[start..start + plane]);
+            FileBacking::Single { cache, .. } => *cache = Some(pixels),
+            FileBacking::Nd { cache, .. } | FileBacking::Stream { cache, .. } => {
+                // Other readers may have changed the cache while decoding.
+                cache.prepare_read(pixels.capacity() * std::mem::size_of::<u16>());
+                cache.insert(unit.key, pixels);
             }
         }
         Ok(())
@@ -2539,6 +2504,134 @@ mod tests {
         }
         drop(handle);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_cold_plane_and_batch_reads_finish_in_small_pools() {
+        // Run behind a timeout so a lock/pool regression fails instead of
+        // hanging the entire test suite. The worker owns all borrowed data.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let d = Dims5 {
+                x: 32,
+                y: 17,
+                z: 7,
+                c: 3,
+                t: 2,
+            };
+            let plane = d.x * d.y;
+            let data: Vec<_> = (0..d.voxels().unwrap())
+                .map(|i| ((i * 31) % 50000) as u16)
+                .collect();
+            // Multiple codec blocks are needed to exercise nested Rayon work.
+            let options = Options {
+                block_depth: 1,
+                ..Options::default()
+            };
+            let lossy_options = LossyOptions {
+                block_depth: 1,
+                ..LossyOptions::default()
+            };
+            for lossy in [false, true] {
+                for kind in 0..3 {
+                    let dims = if kind == 0 {
+                        Dims5 { c: 1, t: 1, ..d }
+                    } else {
+                        d
+                    };
+                    let path = temp_path("concurrent-small-pool");
+                    let input = &data[..dims.voxels().unwrap()];
+                    if kind == 2 {
+                        let mode = if lossy {
+                            WriterMode::Lossy(lossy_options)
+                        } else {
+                            WriterMode::Lossless(options)
+                        };
+                        let mut writer =
+                            RadeltaStreamWriter::new(path.clone(), dims, mode, 1).unwrap();
+                        for (i, pixels) in input.chunks_exact(plane).enumerate() {
+                            writer
+                                .write_plane(
+                                    i / (dims.c * dims.z),
+                                    i / dims.z % dims.c,
+                                    i % dims.z,
+                                    pixels,
+                                )
+                                .unwrap();
+                        }
+                        writer.finish().unwrap();
+                    } else {
+                        let encoded = match (kind, lossy) {
+                            (0, false) => crate::compress_u16(input, dims.volume_dims(), options),
+                            (0, true) => {
+                                crate::compress_lossy_u16(input, dims.volume_dims(), lossy_options)
+                            }
+                            (_, false) => crate::compress_u16_nd(input, dims, options),
+                            (_, true) => crate::compress_lossy_u16_nd(input, dims, lossy_options),
+                        }
+                        .unwrap();
+                        fs::write(&path, encoded).unwrap();
+                    }
+                    let coords = [(0, 0, 0), (dims.t - 1, dims.c - 1, dims.z - 1), (0, 0, 0)];
+                    let reference = RadeltaFileHandle::open(&path).unwrap();
+                    let mut expected = vec![0; coords.len() * plane];
+                    for (&(t, c, z), dst) in coords.iter().zip(expected.chunks_exact_mut(plane)) {
+                        reference.read_plane(t, c, z, dst).unwrap();
+                    }
+                    drop(reference);
+                    for threads in [1, 2] {
+                        let pool = rayon::ThreadPoolBuilder::new()
+                            .num_threads(threads)
+                            .build()
+                            .unwrap();
+                        // Fresh handles ensure cache misses even for single-volume files.
+                        let readers: Vec<_> = (0..16)
+                            .map(|_| {
+                                let reader = RadeltaFileHandle::open(&path).unwrap();
+                                reader.set_cache_limit(0).unwrap();
+                                reader
+                            })
+                            .collect();
+                        let start = std::sync::Barrier::new(4);
+                        std::thread::scope(|scope| {
+                            for index in 0..4 {
+                                let (pool, readers, start, expected) =
+                                    (&pool, &readers, &start, &expected);
+                                scope.spawn(move || {
+                                    for reader in readers {
+                                        start.wait();
+                                        let mut out = vec![65535; expected.len() + 1];
+                                        pool.install(|| {
+                                            if index == 0 {
+                                                for (&(t, c, z), dst) in coords.iter().zip(
+                                                    out[..expected.len()].chunks_exact_mut(plane),
+                                                ) {
+                                                    reader.read_plane(t, c, z, dst).unwrap();
+                                                }
+                                            } else {
+                                                reader.read_planes(&coords, &mut out).unwrap();
+                                            }
+                                        });
+                                        assert_eq!(
+                                            &out[..expected.len()],
+                                            expected.as_slice(),
+                                            "kind={kind}, lossy={lossy}, threads={threads}"
+                                        );
+                                        assert_eq!(out[expected.len()], 65535, "tail overwritten");
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    fs::remove_file(path).unwrap();
+                }
+            }
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("concurrent single/batch reads failed or deadlocked");
+        worker.join().unwrap();
     }
 
     #[test]
