@@ -2,7 +2,7 @@
 
 The Radelta ImageJ JAR bundles the native HDF5 filter and registers it
 automatically in Fiji's HDF5 runtime. The complete
-`radelta-imagej-<version>-fiji.zip` also includes the existing HDF5_Vibez
+`radelta-imagej-<version>-fiji.zip` also includes the HDF5_Vibez
 importer and its reader dependencies. Extract that ZIP, close Fiji and run
 `python install.py /path/to/Fiji.app`. Full installation instructions are in
 the complete bundle's `README.md`.
@@ -16,7 +16,7 @@ an `axes` attribute (as written by Fiji and the `radelta-hdf5` tools) opens
 directly. Otherwise a dialog lists the Radelta datasets and asks for the
 layout, defaulting to the `axes` attribute or to `yx`/`zyx`/`czyx`/`tczyx`
 by rank. HDF5 files without Radelta data are left to Fiji's other readers.
-HDF5_Vibez's own browser remains available through **Plugins → Radelta →
+HDF5_Vibez's own browser is available through **Plugins → Radelta →
 Open HDF5…** or **File → Import → HDF5…**; for the `(186,613,860)` `/images`
 example, choose layout `zyx` there.
 
@@ -75,14 +75,14 @@ tools with the SDK filter, can read the result. Writing uses the same
 embedded filter as reading: it makes no HDF5 API calls, so the plugin supplies
 the chunk geometry and byte order with the other filter parameters.
 
-Do not add the full SDK runtime to Fiji's library search paths. If an old
-`HDF5_PLUGIN_PATH` points to that SDK filter or an older Radelta decoder,
+Do not add the full SDK runtime to Fiji's library search paths. If
+`HDF5_PLUGIN_PATH` points to that SDK filter or another Radelta filter,
 remove it before starting Fiji; the plugin reports which filter is registered.
 
 JHDF5 19.04.1 supports Windows x86-64, Linux x86-64 and both macOS
 architectures. Linux ARM64 needs a compatible JHDF5 native build; that
 platform's supplied JAR lacks one. The Radelta decoder and `.rdlt` support
-are still built for all five platforms. Windows requires the Microsoft Visual
+are built for all five platforms. Windows requires the Microsoft Visual
 C++ 2015–2022 x64 runtime; its supported JHDF5 and decoder use the shared UCRT.
 A Mac using Intel Java under Rosetta needs the x86-64 decoder, chosen
 automatically from the Java architecture.
@@ -97,7 +97,7 @@ automatically. The standalone ZIP contains only the embedded filter and
 documentation, with no additional HDF5 runtime. Set `HDF5_PLUGIN_PATH` to its
 extracted `plugins` directory before
 starting the reader. It decodes every Radelta dataset. It encodes only datasets
-created with all 17 filter parameters (see [filter parameters](README.md#filter-parameters-and-id));
+created with the complete local filter parameters (see [filter parameters](README.md#filter-parameters-and-id));
 with the usual 0 or 11, writes fail, so use the full SDK filter for general
 writing. Both builds have the private ID 65024; choose one Radelta filter
 directory per reader.
@@ -115,8 +115,8 @@ To test a built JAR against installed HDF5 fixture tools:
 ```sh
 python scripts/test_hdf5_fiji.py --platform linux --arch x86_64 \
   --prefix _deps/hdf5-install \
-  --archive dist/radelta-hdf5-filter-0.9.2-linux-x86_64.zip \
-  --imagej-jar imagej-plugin/target/radelta-imagej-0.9.2.jar
+  --archive dist/radelta-hdf5-filter-<version>-linux-x86_64.zip \
+  --imagej-jar imagej-plugin/target/radelta-imagej-<version>.jar
 ```
 
 Tests require JDK 17 and download SHA256-pinned Fiji/SciJava dependencies.

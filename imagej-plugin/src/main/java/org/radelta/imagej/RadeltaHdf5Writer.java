@@ -321,8 +321,8 @@ final class RadeltaHdf5Writer {
                                 }
                             long[] start = {t, c, z0, y0, x0}, count = {1, 1, dz, dy, dx};
                             h5.selectHyperslab(fileSpace, tail(start, rank), tail(count, rank));
-                            // A memory space shaped like the selection keeps HDF5
-                            // 1.10 on its fast path; a flat one is 2.5x slower.
+                            // Match the memory-space rank and dimensions to the selected
+                            // hyperslab so HDF5 can transfer the block directly.
                             long memory = h5.createSimpleSpace(tail(count, rank));
                             try {
                                 h5.writeUint16(dataset, memory, fileSpace, n == buffer.length ? buffer : java.util.Arrays.copyOf(buffer, n));

@@ -6,9 +6,6 @@ It works with TIFF stacks, ImageJ/Fiji, Python/NumPy, HDF5 and OME-Zarr, and off
 - **Lossless** (default): every pixel is restored exactly.
 - **Calibrated lossy**: discards detail smaller than the photon shot noise, using your camera's offset and gain, for much smaller files.
 
-> **Radelta is pre-1.0.** The file format can still change between releases.
-> Files written by versions 0.5.0–0.7.1 cannot be read by 0.7.2 or later.
-> Please keep your original data until you have checked the compressed copy.
 
 
 ## Contents
@@ -64,11 +61,10 @@ The files it writes can be opened with the command-line tool and the ImageJ/Fiji
 - **Single files or whole folders:** in desktop Chrome or Edge, you can choose an output folder and process a folder of files at once.
   Other browsers download each result instead, which is limited to 256 MiB of image data per file.
 
-Currently, it does not accept RGB or other multi-sample pages, or multi-file and partial OME-TIFF datasets; please use the command-line tool for those.
+The browser tool does not accept RGB or other multi-sample pages, or multi-file and partial OME-TIFF datasets; please use the command-line tool for those.
  
-Radelta Web is **highly experimental** and is undergoing rapid development.
-Please keep your original files until you have checked the outputs!
-Note also that compression/decompression in the browser is slower than running the CLI tools or ImageJ/Fiji plugin.
+Use **Verify pixels** to check lossless results before deleting source data.
+Browser throughput depends on the computer, browser and dataset; the native CLI and Fiji plugin provide direct access to the native codec.
 
 
 ### Fiji
@@ -76,8 +72,8 @@ Note also that compression/decompression in the browser is slower than running t
 To open and save `.rdlt` files:
 
 1. Download `radelta-imagej-<version>.jar`.
-2. Close Fiji, copy the JAR into `Fiji.app/plugins`, and delete any older
-   `radelta-imagej-*.jar` there.
+2. Close Fiji, copy the JAR into `Fiji.app/plugins`, and delete other
+   `radelta-imagej-*.jar` files there.
 3. Restart Fiji. The commands appear under **Plugins › Radelta**.
 
 To open Radelta-compressed HDF5 files as well, download `radelta-imagej-<version>-fiji.zip` instead, extract it, close Fiji and run the included installer with Python 3.8 or later:
@@ -86,7 +82,7 @@ To open Radelta-compressed HDF5 files as well, download `radelta-imagej-<version
 python install.py /path/to/Fiji.app
 ```
 
-This adds any missing HDF5 reader libraries and disables older Radelta JARs. See [Fiji installation](imagej-plugin/FIJI_BUNDLE.md) for details.
+This adds any missing HDF5 reader libraries and disables duplicate Radelta JARs. See [Fiji installation](imagej-plugin/FIJI_BUNDLE.md) for details.
 
 ### Command line
 
@@ -165,7 +161,7 @@ Use **lossless** unless file size is a really strong constraint.
 It is the default and restores every value exactly.
 
 **Lossy** mode uses the fact that a pixel recording `N` photoelectrons carries random shot noise of about `√N`.
-It rounds each pixel to a step that is a fixed fraction of that noise, so bright pixels are stored more coarsely than dim ones, but always below the noise.
+It quantises a variance-stabilised square-root signal, so the step size scales with photon shot noise. Bright pixels use larger steps in ADU than dim pixels; `--noise-step` controls the rounding error relative to the shot noise.
 It needs three numbers:
 
 | Option | Meaning | Where to find it |
@@ -187,8 +183,9 @@ Things to know before using lossy mode:
 
 ## Supported data
 
-- **Pixel type:** unsigned 16-bit only.
-  8-bit, 32-bit and floating-point images are not currently supported.
+- **Pixel type:** unsigned 8-bit and 16-bit.
+  Signed integers, 32-bit integers and floating-point images are not supported.
+  Browser input support is listed separately above.
 - **Dimensions:** up to five (time, channel, Z, Y, X).
   Neighbouring pixels are only used for prediction within one channel at one timepoint.
 - **TIFF input:** multipage stacks, ImageJ/Fiji hyperstacks and single-file OME-TIFF.
@@ -271,6 +268,7 @@ Compared with lossless compression, we obtain an almost 12× smaller file (43× 
 - [File format](docs/FORMAT.md)
 - [Benchmarks](docs/BENCHMARKS.md)
 - [Building from source and contributing](docs/DEVELOPING.md)
+- [Implementation architecture](docs/ARCHITECTURE.md)
 - [Changelog](CHANGELOG.md)
 
 

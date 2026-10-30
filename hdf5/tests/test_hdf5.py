@@ -53,7 +53,7 @@ class FilterTests(unittest.TestCase):
                 dcpl = ds.id.get_create_plist()
                 self.assertEqual(dcpl.get_chunk(), (1, 7, 9))
                 self.assertEqual(dcpl.get_nfilters(), 1)
-                # Older h5py uses a fixed 16-word get_filter() buffer but can
+                # Some supported h5py builds use a 16-word get_filter() buffer but can
                 # return the full parameter count. Entries beyond 16 are then
                 # garbage, even when len(params) >= 18. Check the byte width
                 # through dtype/pixel round trips and verify actual filtering.

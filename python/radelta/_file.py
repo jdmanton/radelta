@@ -101,8 +101,8 @@ class Dataset:
         plane = np.empty(self._dims[-2:], dtype=np.uint16)
         check_file(library().radelta_file_read_plane_u16(self._handle, t, c, z,
                                                        pixel_pointer(plane), plane.size))
-        # Basic slicing returns a view; advanced indexing copied the selected
-        # plane before __getitem__ copied it again into the result.
+        # Basic slicing returns a view; __getitem__ copies the selected region
+        # into the final output.
         def selected_slice(r):
             return slice(r.start, None if r.step < 0 and r.stop < 0 else r.stop, r.step)
         return plane[selected_slice(ys), selected_slice(xs)]
@@ -144,7 +144,7 @@ class Dataset:
                     # Decode independent units together, directly into the
                     # final contiguous output. Bound coordinate lists and the
                     # amount of output covered by one call; keep HDF5 and XY
-                    # crops on their existing region-reading paths.
+                    # crops on their region-reading paths.
                     planes = output.reshape((-1, *output.shape[-2:]))
                     plane_bytes = planes.shape[1] * planes.shape[2] * 2
                     batch = max(1, min(128, (64 << 20) // plane_bytes))

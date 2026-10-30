@@ -71,7 +71,7 @@ fn indexed_containers_read_random_planes_and_reject_incomplete_records() {
                 }
             }
             drop(file);
-            // The zero-budget compatibility mode must also read correctly
+            // The zero-budget single-entry cache must also read correctly
             // while every channel switch evicts the previous decoded entry.
             let file = RadeltaFileHandle::open(&path).unwrap();
             file.set_cache_limit(0).unwrap();

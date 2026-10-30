@@ -1,4 +1,4 @@
-"""Streaming export of uint16 TIFF/HDF5 images to BDV XML/HDF5."""
+"""Streaming export of grayscale TIFF or uint16 HDF5 images to BDV XML/HDF5."""
 from collections import OrderedDict
 from contextlib import ExitStack
 import itertools
@@ -266,8 +266,7 @@ def export_bdv(input_path, output_xml, *, dataset="/images", axes=None,
                     setup = out.require_group(f"s{c:02d}")
                     setup.create_dataset("resolutions", data=np.asarray(levels, dtype=np.float64)[:, ::-1])
                     setup.create_dataset("subdivisions", data=np.asarray(tiles, dtype=np.int32)[:, ::-1])
-                    # Current BDV supports uint16 explicitly; legacy readers
-                    # interpret 16-bit storage as unsigned too.
+                    # Declare unsigned 16-bit storage for BDV readers.
                     setup.attrs["dataType"] = "uint16"
                 for t, c in itertools.product(range(source.shape[0]), range(source.shape[1])):
                     previous = None

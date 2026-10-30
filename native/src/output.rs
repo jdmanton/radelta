@@ -29,7 +29,7 @@ pub struct PendingOutput {
 
 impl PendingOutput {
     pub fn create(destination: &Path) -> io::Result<(Self, File)> {
-        // Resolve the parent now so later changes to the working directory do
+        // Resolve the parent so changes to the working directory do
         // not redirect publication or cleanup. Replace an output symlink itself.
         let parent = destination
             .parent()

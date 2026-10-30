@@ -53,7 +53,7 @@ class EmbeddedTests(unittest.TestCase):
             identifier, flags, params, _ = ds.id.get_create_plist().get_filter(0)
             self.assertEqual(identifier, 65024)
             self.assertEqual(flags & h5py.h5z.FLAG_OPTIONAL, 0)
-            # Older h5py get_filter() exposes only a 16-word diagnostic
+            # Some supported h5py builds expose a 16-word get_filter() diagnostic
             # buffer. Check geometry here and byte order via decoded pixels.
             self.assertEqual(params[11:16], (5, 4, 2, 1, 1))
             ds.id.close()

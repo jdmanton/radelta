@@ -1,4 +1,4 @@
-//! Regression cases adapted from the alternative implementation. ImageJ reads
+//! ImageJ reads
 //! `images=N` planes consecutively from the first strip offset; TIFF directories
 //! between planes corrupt that reading. The IFD chain must also stay valid.
 use std::{fs, path::PathBuf, process::Command};

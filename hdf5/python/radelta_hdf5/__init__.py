@@ -1,4 +1,4 @@
-"""Chunked uint16 HDF5 datasets with automatic bundled-filter registration."""
+"""Chunked uint8/uint16 HDF5 datasets with automatic bundled-filter registration."""
 import ctypes
 import math
 import operator
@@ -30,7 +30,7 @@ def configure_plugin(directory=None):
         path = directory / name
         if path not in _plugin_libraries:
             # ctypes uses Windows' modern DLL search flags, including the
-            # dependency directories added by delvewheel. HDF5's legacy
+            # dependency directories configured by delvewheel. HDF5's
             # LoadLibraryEx search does not find those directories reliably.
             _plugin_libraries[path] = ctypes.CDLL(str(path))
         library = _plugin_libraries[path]

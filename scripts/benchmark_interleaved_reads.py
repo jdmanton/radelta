@@ -121,7 +121,7 @@ def main():
             old, new = map(statistics.median, times)
             label = path.stem + (" interleaved" if interleaved else " sequential")
             print(f"| {label} | {old*1000:.3f} | {new*1000:.3f} | {old/new:.2f}× |", flush=True)
-        # Check the new opt-out path against the same independent pixel truth.
+        # Check single-entry caching against the same independent pixel truth.
         read(dlls[1], path, image, True, legacy=True)
     if args.baseline_cli:
         import tifffile
@@ -133,7 +133,7 @@ def main():
                     for i in ([0, 1] if repeat % 2 == 0 else [1, 0]):
                         binary = [args.baseline_cli, args.candidate_cli][i]
                         # Generated fixture output; keep cleanup outside timing
-                        # and remain compatible with older CLIs without --force.
+                        # so each decode starts with an absent output path.
                         outputs[i].unlink(missing_ok=True)
                         start = time.perf_counter()
                         run = subprocess.run([str(binary.resolve()), "decode", str(path.resolve()),

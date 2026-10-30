@@ -134,7 +134,7 @@ Supported `scale-bits` values are 8–11.
 The `mean` context retains fractional neighbour means with a compact table and
 uses both left and upper neighbours on the first plane of each block.
 `mean-signs` additionally distinguishes the ordering of those neighbours,
-using larger tables that can improve compression ratio at a speed cost.
+using larger tables for finer conditioning at a speed cost.
 `signs` and `signed3` remain available for comparing compression on different
 kinds of data.
 
@@ -225,8 +225,7 @@ Large datasets can be written as streaming `RDS3`/`RQS3` files. Streaming is sel
 | `--memory-mib N` | approximate streaming RAM budget (encode/decode) | `2048` MiB |
 | `--stream` | force bounded-memory streaming | off |
 
-Positive memory allowances are used as given; they are not silently raised to
-64 MiB. This remains a working-buffer estimate, so a single oversized chunk or
+Positive memory allowances are used as given. This remains a working-buffer estimate, so a single oversized chunk or
 volume and metadata can exceed it.
 
 ## Lossy calibration
@@ -300,10 +299,8 @@ one complete level plane plus codec workspace. This is separate from the main
 streaming image-buffer allowance. Unsupported SubIFD sample types, linked image
 chains within SubIFDs, and SubIFDs on ImageJ or planar-multisample primary pages
 are rejected instead of being discarded. Additional top-level image series or
-thumbnails with different XY dimensions remain unsupported.
+thumbnails with different XY dimensions are unsupported.
 
-Files containing pyramids require this updated TIFF adapter to restore them.
-Older files which discarded pyramid pixels must be re-encoded from the originals.
 Unknown private values are preserved, but
 vendor-specific pointers hidden inside opaque binary values cannot be relocated.
 See [metadata encoding](FORMAT.md#opaque-metadata-all-containers) for details.
@@ -372,9 +369,8 @@ scratch, TIFF directories and metadata also use memory, and at least one whole
 stored Radelta volume/chunk must fit for decoding. One unit larger than the
 allowance can therefore proceed, as with the file reader API.
 
-See [TIFF export measurements](TIFF_EXPORT_PERFORMANCE.md) and the initial
-[pipeline measurements](STREAM_PIPELINE_PERFORMANCE.md) for local timing,
-memory tradeoffs and procedures for comparing real acquisitions.
+See [implementation architecture](ARCHITECTURE.md) for buffer ownership and
+memory planning, and [benchmark tools](BENCHMARKS.md) for timing scopes.
 
 ## HDF5 conversion
 

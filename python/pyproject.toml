@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "radelta"
 version = "0.9.2"
-description = "Lossless and camera-calibrated uint16 array compression"
+description = "Lossless and camera-calibrated uint8/uint16 array compression"
 requires-python = ">=3.9"
 license = {text = "BSD-3-Clause"}
 dependencies = ["numpy>=1.21"]

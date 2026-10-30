@@ -2,7 +2,7 @@
 
 Download `radelta-imagej-<version>-fiji.zip` from the release and extract it.
 It contains the Radelta ImageJ JAR with native codec libraries and HDF5
-decoders, plus the existing HDF5_Vibez importer and its reader dependencies.
+decoders, plus the HDF5_Vibez importer and its reader dependencies.
 Third-party JARs stay separate, with their licences and importer source.
 
 Close Fiji, then run the included installer with Python 3.8 or later:
@@ -19,13 +19,13 @@ python3 install.py /path/to/Fiji.app
 
 Choose the Fiji directory containing its `plugins` and `jars` folders. The
 installer reuses reader libraries already installed, adds missing ones, and
-disables older Radelta JARs by retaining them with a `.jar.disabled` suffix.
-It does not overwrite Fiji's ImageJ core. If an old or duplicate HDF5 reader
+disables duplicate Radelta JARs by retaining them with a `.jar.disabled` suffix.
+It does not overwrite Fiji's ImageJ core. If an unsupported or duplicate HDF5 reader
 is detected, update it using Fiji's updater before retrying.
 
 Restart Fiji and drag a Radelta HDF5 file onto it, or use **File → Open…**;
 see [opening in Fiji](../hdf5/FIJI.md). To browse every dataset in a file,
-choose **Plugins → Radelta → Open HDF5…**, or the existing
+choose **Plugins → Radelta → Open HDF5…**, or the
 **File → Import → HDF5…** command. Select your dataset and axis layout:
 In the importer, choose **individual hyperstacks (custom layout)** to enter
 the layout explicitly.
@@ -40,11 +40,11 @@ the layout explicitly.
 For the `(186,613,860)` `/images` example, use `zyx`. The plugin extracts the
 appropriate decoder for Fiji's Java architecture and registers its directory
 with JHDF5 automatically. **No HDF5_PLUGIN_PATH setting is needed.** Remove
-any previous setting pointing at the full Radelta HDF5 SDK before starting
+any setting pointing at the full Radelta HDF5 SDK before starting
 Fiji, especially if scripts initialise HDF5 before Fiji's startup services.
 
 If the reader dependencies are already installed, copying only the released
-`radelta-imagej-<version>.jar` into `plugins` is sufficient. Remove older
+`radelta-imagej-<version>.jar` into `plugins` is sufficient. Remove duplicate
 Radelta JARs and restart Fiji. In ImageJ1 without SciJava startup services,
 use the **Radelta → Open HDF5** command to initialise the decoder first.
 

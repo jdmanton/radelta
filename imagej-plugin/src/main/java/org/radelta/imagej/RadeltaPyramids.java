@@ -12,7 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Index into the existing TIFF metadata payload; compressed pixels are not copied. */
+/** Index into the TIFF metadata payload; compressed pixels are not copied. */
 final class RadeltaPyramids {
     static final class Plane {
         final int width, height, offset, length, bitDepth;

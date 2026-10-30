@@ -1,4 +1,4 @@
-"""Lossless and calibrated-lossy compression for uint16 NumPy arrays.
+"""Lossless and calibrated-lossy compression for uint8 and uint16 NumPy arrays.
 
 compress/decompress operate on bytes; read/write operate on files. open returns
 a lazy, read-only dataset and should be used as a context manager. HDF5 support

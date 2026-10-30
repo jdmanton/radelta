@@ -278,7 +278,7 @@ fn planar_round_trip(extra: &[&str], name: &str) {
     check_encoded(&encoded, pages, samples);
 
     // Decoding restores the source plane order: page by page, sample fastest,
-    // now as single-sample pages.
+    // as single-sample pages.
     run_ok(&[
         "decode",
         encoded.to_str().unwrap(),

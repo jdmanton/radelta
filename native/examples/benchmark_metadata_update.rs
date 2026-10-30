@@ -1,5 +1,5 @@
-//! Run this unchanged example against before/after libraries. Measures metadata
-//! replacement only, using warm caches without fsync. No codec work is timed.
+//! Measure metadata replacement with warm caches and without fsync.
+//! Codec work is excluded from the timings.
 use radelta_native::{compress_u16, set_file_metadata, set_metadata, Dims, Options};
 use std::{fs, path::PathBuf, time::Instant};
 

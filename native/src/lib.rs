@@ -902,7 +902,7 @@ fn normalize_row_into(
     let mut total = 0usize;
     // Real image counts normally fit in a hardware divide. The bound covers
     // every numerator as well as the denominator; extreme u64 counts retain
-    // the original u128 arithmetic.
+    // u128 arithmetic.
     let narrow = sum <= u64::MAX as u128 / target as u128;
 
     for (sym, &c) in counts.iter().enumerate() {
@@ -1419,8 +1419,8 @@ fn decode_r_packed_one<const DEFAULT: bool>(
 }
 
 // Several batches per worker let Rayon balance bright and empty slabs. Bound
-// extra private tables by 64 MiB; very large models keep the previous one-table
-// per worker limit, and a single worker never needs balancing overhead.
+// extra private tables by 64 MiB; very large models use one table
+// per worker, and a single worker needs no balancing overhead.
 fn histogram_grain(blocks: usize, entries: usize) -> usize {
     let workers = rayon::current_num_threads();
     if workers == 1 {
@@ -3147,7 +3147,7 @@ pub fn inspect_dims(data: &[u8]) -> Result<Dims> {
 }
 
 /// Compress canonical contiguous T,C,Z,Y,X uint16 data losslessly.
-/// Each (t,c) XYZ volume is coded independently using the existing RDL1
+/// Each (t,c) XYZ volume is coded independently using an RDL1
 /// codec and wrapped in an RDM2 multidimensional container.
 pub fn compress_u16_nd(input: &[u16], dims: Dims5, options: Options) -> Result<Vec<u8>> {
     compress_u16_nd_with_stats(input, dims, options).map(|v| v.0)
@@ -4555,7 +4555,7 @@ mod tests {
             compress_lossy_u16(&input, dims, lossy).unwrap(),
         ] {
             // X is the first dimension, after magic, version and flags. The
-            // header still parses, but now asks for over a terabyte of pixels.
+            // header parses but requests over a terabyte of pixels.
             let mut damaged = encoded.clone();
             damaged[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
             assert!(decompress_u16(&damaged).is_err());

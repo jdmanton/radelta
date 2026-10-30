@@ -2,8 +2,8 @@
 """Compare the same benchmark_codec Rust example built against two libraries.
 
 All reported times exclude file I/O, fixture generation, output allocation for
-decoding and validation. Each process warms up once. Alternate before/after
-processes across batches; bind to the first requested available CPUs on Linux.
+decoding and validation. Each process warms up once. Alternate the two
+executables across batches; bind to the first requested available CPUs on Linux.
 Requires NumPy, plus tifffile when --tiff is used. The Rust example independently
 checks every decoded pixel, including scalar lossy reconstruction.
 """

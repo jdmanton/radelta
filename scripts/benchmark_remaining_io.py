@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare planar TIFF ingestion and Zarr chunk framing after four I/O patches.
+"""Measure planar TIFF ingestion and Zarr chunk framing for two builds.
 
 Requires numpy and tifffile. Use release binaries. Native codec code is held
 constant for Zarr comparisons; only the Python adapter differs. Timings use
@@ -21,7 +21,7 @@ import tifffile
 
 def run(binary, *args):
     # These are generated benchmark outputs. Remove them outside the timed
-    # section so both old CLIs and no-overwrite-by-default CLIs can repeat.
+    # section so repeated runs start with absent output paths.
     if args[0] in ("encode", "encode-lossy", "decode"):
         Path(args[2]).unlink(missing_ok=True)
     start = time.perf_counter()

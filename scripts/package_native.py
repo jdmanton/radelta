@@ -68,7 +68,8 @@ def main() -> int:
         shutil.copy2(ROOT / name, stage / name)
     docs = stage / "docs"
     docs.mkdir()
-    for name in ("FORMAT.md", "CLI.md", "C_API.md"):
+    for name in ("FORMAT.md", "CLI.md", "C_API.md", "ARCHITECTURE.md",
+                 "BENCHMARKS.md", "DEVELOPING.md", "PYTHON.md"):
         shutil.copy2(ROOT / "docs" / name, docs / name)
 
     # Ship a Python OME-Zarr codec package backed by this exact native build.

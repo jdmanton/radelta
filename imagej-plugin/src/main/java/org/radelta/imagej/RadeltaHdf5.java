@@ -55,8 +55,8 @@ public final class RadeltaHdf5 {
             if (available <= 0) throw new IOException("HDF5 could not load the bundled Radelta decoder");
             int flags = ((Number)h5.getMethod("H5Zget_filter_info", int.class).invoke(null, 65024)).intValue();
             if ((flags & 2) == 0) throw new IOException("The registered Radelta filter cannot decode images");
-            // The SDK filter links a second HDF5 runtime and older decoders cannot
-            // read checksummed data; only the bundled embedded build is safe here.
+            // The SDK filter links a second HDF5 runtime. Require the bundled
+            // embedded filter to share JHDF5's runtime and parameter contract.
             String name = new Hdf5Bindings().filterName(65024);
             if (!name.endsWith(RadeltaHdf5Writer.EMBEDDED_SUFFIX))
                 throw new IOException("Another Radelta HDF5 filter (" + name + ") is already registered. " +
@@ -75,7 +75,7 @@ public final class RadeltaHdf5 {
         }
     }
 
-    /** Scriptable headless import using the existing HDF5_Vibez implementation. */
+    /** Scriptable headless import through HDF5_Vibez. */
     public static ImagePlus open(String filename, String dataset, String layout) throws IOException {
         configure();
         try {

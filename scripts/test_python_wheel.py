@@ -39,7 +39,7 @@ def main():
         python = work / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         dependencies = []
         if args.h5py_version:
-            # Older h5py wheels use NumPy's pre-2.0 ABI.
+            # The pinned h5py wheel is tested with NumPy's 1.x ABI.
             dependencies += ["h5py=="+args.h5py_version, "numpy<2"]
         # Verify installation against bundled upstream runtimes. Missing h5py
         # or NumPy wheels must fail rather than build against a local SDK.

@@ -199,7 +199,7 @@ static void compare_raw(const char *path, const char *dataset, const char *raw_p
     printf("%s%s: matches its expected pixels\n", path, dataset);
 }
 
-/* write/read use the SDK and embedded filter respectively, as before;
+/* write/read use the SDK and embedded filter respectively;
  * write-embedded/read-sdk check the other direction. */
 int main(int argc, char **argv) {
     if (argc == 5 && !strcmp(argv[1], "compare")) {

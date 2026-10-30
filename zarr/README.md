@@ -2,7 +2,7 @@
 
 The optional `radelta-zarr` Python package provides native Radelta codecs for
 **Zarr format 2 and 3**, with OME-Zarr **0.4 and 0.5** metadata respectively.
-It compresses unsigned 16-bit image chunks using the existing Rust/C codec.
+It compresses unsigned 8-bit or 16-bit image chunks using the Rust/C codec.
 Lossless and camera-calibrated lossy modes are supported. Spatial prediction
 never crosses channel or time boundaries: axis names are explicit in every
 codec configuration, including images without a Z or C axis.
@@ -17,7 +17,7 @@ Download the `radelta_zarr` wheel for your operating system and architecture
 from the GitHub release, then install that file. For Windows x86-64:
 
 ```powershell
-python -m pip install .\radelta_zarr-0.9.2-py3-none-win_amd64.whl
+python -m pip install .\radelta_zarr-<version>-py3-none-win_amd64.whl
 python -m radelta_zarr --help
 ```
 
@@ -40,7 +40,7 @@ python -m radelta_zarr --help
 
 The **OME-Zarr CI** workflow builds/tests ZIPs and wheels on all five native
 release platforms and uploads them as Actions artifacts. It can be run manually
-after merging the workflow to the default branch. Tag releases also test the
+from the default branch. Tag releases also test the
 installed wheel before publishing the ZIPs and wheels.
 
 Linux release builds run in manylinux_2_28 images, then auditwheel checks the
@@ -49,11 +49,11 @@ analysis of the ctypes-loaded DLL; macOS uses delocate with a deployment target
 of 11.0. Native ZIPs, wheels and ImageJ assets reuse the same native build per
 platform. Wheels are installed into fresh virtual environments and checked
 outside the source checkout before upload, including the full integration
-suite. HDF5 remains a separate release asset with its own runtime and tools.
+suite. HDF5 is a separate release asset with its own runtime and tools.
 
 This also works in PowerShell. Installation requires Python 3.11 or later.
 The package uses Zarr-Python 3 to read/write both storage formats; it does not
-require installing the old Zarr-Python 2 package. Native assets are installed
+require installing Zarr-Python 2. Native assets are installed
 with the Python package, and its generated wheel is marked for that platform.
 On Windows use a matching 64-bit Python interpreter and the native runtime
 required by the ordinary Radelta release.
@@ -65,7 +65,7 @@ cargo build --release --locked --manifest-path native/Cargo.toml
 python -m pip install -e ./zarr/python
 ```
 
-Alternatively set `RADELTA_NATIVE_LIBRARY` to the full path of a Radelta 0.6.0+
+Alternatively set `RADELTA_NATIVE_LIBRARY` to the full path of a Radelta
 DLL/shared library before running Python. On Windows:
 
 ```powershell
@@ -100,8 +100,8 @@ python -m radelta_zarr info image.ome.zarr
 python -m radelta_zarr decode image.ome.zarr restored.ome.tif
 ```
 
-New stores default to OME-Zarr 0.5 / Zarr v3. Add `--zarr-format 2` for OME-Zarr
-0.4 / Zarr v2. The TIFF importer supports a single grayscale uint16 series of
+Stores default to OME-Zarr 0.5 / Zarr v3. Add `--zarr-format 2` for OME-Zarr
+0.4 / Zarr v2. The TIFF importer supports a single grayscale uint8 or uint16 series of
 YX pages. It infers TIFF axes, converts them to t,c,z,y,x order and assembles
 chunks on one producer thread while compression and writes overlap. Use
 `--axes TZCYX` to override source axes. Unknown plain page
@@ -150,7 +150,7 @@ python -m radelta_zarr repack existing.ome.zarr compressed.ome.zarr --chunks 4,2
 Repacking retains the input storage format, hierarchy, group/array attributes,
 coordinate transforms, multiscale levels, display metadata and label metadata.
 It finds declared multiscales recursively, including images in plate/well groups.
-Only uint16 image/label arrays are recompressed; other arrays are copied without
+Only uint8/uint16 image and label arrays are recompressed; other arrays are copied without
 modifying their codec or values. Non-array sidecars such as
 `OME/METADATA.ome.xml` are retained. Unknown files inside a rewritten array's
 payload directory are not retained; store sidecars alongside groups instead.
@@ -158,12 +158,12 @@ Copied consolidated metadata is regenerated after recompression.
 
 Arrays eligible for Radelta must have unique axes chosen from t,c,z,y,x and
 include y and x. Existing spatial axis permutations are supported, while new
-images use canonical t,c,z,y,x order. Other axis names are rejected for uint16
+images use canonical t,c,z,y,x order. Other axis names are rejected for uint8/uint16
 multiscales. Metadata consistency is checked, including v3 dimension names.
 `--chunks` must match every rewritten array's rank; omit it for heterogeneous
 image/label ranks to retain each array's own chunks. V3 sharding is retained.
 
-All uint16 labels are kept **lossless**, even during lossy image recompression;
+All uint8/uint16 labels are kept **lossless**, even during lossy image recompression;
 other integer label types are copied verbatim. To quantise existing intensity
 levels once using your camera calibration:
 
@@ -201,7 +201,7 @@ at its source block's centre. Each level is completed before the next is
 generated, with bounded concurrent chunk writes.
 
 To avoid accumulating camera quantisation errors while generating levels,
-`--lossy` TIFF import currently accepts one level. For a lossy pyramid, generate
+`--lossy` TIFF import accepts one level. For a lossy pyramid, generate
 a lossless pyramid first, then use lossy `repack` to quantise each level once.
 
 ## Python and partial access
@@ -226,7 +226,7 @@ and resize operations. `write_image` accepts NumPy or array-like sources with
 `shape`, `dtype` and slicing. Its `workers` argument defaults to up to four
 CPU workers; use `workers=1` for serial writes. Source slicing and progress
 callbacks run on the calling thread. It can target any Zarr group/store supported by
-Zarr-Python. CLI conversion/repacking currently targets local directory stores.
+Zarr-Python. CLI conversion/repacking targets local directory stores.
 Each intersecting compressed chunk is decoded in full. Unrelated chunks are
 not read. V3 Radelta serializers can also be nested inside Zarr sharding.
 
@@ -240,7 +240,7 @@ Use the OME helpers for lossy arrays, or explicitly set
 
 The metadata follows OME-Zarr conventions, but **readers must implement the
 custom Radelta codec**. Python code can import `radelta_zarr` before opening a
-store; newer Zarr versions also discover its installed entry points. Browser
+store; Zarr-Python also discovers its installed entry points. Browser
 viewers, Fiji and other OME-Zarr readers do not automatically gain this codec
 from the Python installation. No JavaScript/Java codec is provided here.
 
@@ -258,8 +258,8 @@ current decoded values; converting lossy data cannot restore discarded detail.
 The codec identifier is `radelta.radelta`, not an HDF5 integer filter ID. Its
 configuration schema version is 1. Every non-empty encoded chunk has a 20-byte
 `RDZ1` envelope containing frame version, lossless/lossy mode, uncompressed byte
-count and CRC32 over the header prefix and Radelta payload. The payload is the
-existing RDL1/RDM2 or RDLQ/RDQ2 stream. Decode checks framing, checksum and native
+count and CRC32 over the header prefix and Radelta payload. The payload is an
+RDL1/RDM2 or RDLQ/RDQ2 stream. Decode checks framing, checksum and native
 chunk geometry against array metadata before allocating pixel output.
 
 ```sh

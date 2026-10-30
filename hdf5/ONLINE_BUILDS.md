@@ -16,7 +16,7 @@ called by the tag-release workflow. Download the matching
 `hdf5-<platform>-<architecture>` artifact from a completed Actions run; inside
 it contains `radelta-hdf5-<version>-<platform>-<architecture>.zip` and the
 standalone `radelta-hdf5-filter-<version>-<platform>-<architecture>.zip`. Tagged
-releases attach both sets alongside the existing native and ImageJ packages.
+releases attach both sets alongside the native and ImageJ packages.
 No release is published by a manual HDF5 build alone.
 
 Each job builds shared HDF5 1.14.6 from pinned upstream commit
@@ -24,7 +24,7 @@ Each job builds shared HDF5 1.14.6 from pinned upstream commit
 1.98.0. The archive includes the matching HDF5 runtime/development files, HDF5
 tools, Radelta filter, Python helper source and both licences. A relocated-package
 smoke test runs `h5dump -V` and the native plugin-loading/5D round-trip/hyperslab
-test before uploading each ZIP. The existing Linux HDF5 CI job separately runs
+test before uploading each ZIP. The Linux HDF5 CI job runs
 the full Python file-conversion and filter integration suite.
 
 The standalone filter ZIP contains only the embedded Radelta filter and documentation.
@@ -71,9 +71,9 @@ These packages use a minimal shared HDF5 SDK with zlib/SZIP disabled, so its
 tools cannot decode gzip/SZIP-compressed datasets. Radelta and the built-in
 Fletcher32 checksum work. If an application needs other HDF5 filters or an
 existing HDF5 installation, build the Radelta plugin against that installation
-as described in `HDF5.md`. Do not mix two different HDF5 library installations
+as described in [the HDF5 guide](README.md#build-and-install). Do not mix two different HDF5 library installations
 in one process; ordinary PyPI h5py wheels may bundle their own copy.
 
-The default filter ID remains the private ID 65024. Other readers need a
+The default filter ID is the private ID 65024. Other readers need a
 matching plugin and HDF5 library. Applications can use the included headers and
 CMake SDK files to build against the bundled HDF5 library.

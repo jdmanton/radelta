@@ -302,7 +302,7 @@ pub(crate) fn set_file_handle_metadata(file: &mut File, metadata: &[u8]) -> Resu
 }
 
 /// Finish a newly written, unflagged Radelta stream positioned at its end.
-/// Internal writer helper: append metadata through the existing buffered
+/// Internal writer helper: append metadata through the buffered
 /// handle, patch the known-zero flags, and flush before publication.
 #[doc(hidden)]
 pub fn finish_new_file_metadata(writer: &mut (impl Write + Seek), metadata: &[u8]) -> Result<()> {

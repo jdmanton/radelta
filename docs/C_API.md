@@ -2,6 +2,10 @@
 
 The public C interface is declared in `native/include/radelta.h`.
 
+Pixel buffers in this API use `uint16_t`. Adapters for byte images widen the
+samples for these calls and retain their source sample width in metadata or
+container configuration.
+
 Shared-library names are:
 
 ```text
@@ -59,7 +63,7 @@ typedef struct radelta_options {
 
 `RADELTA_CONTEXT_MEAN` uses the sum of causal neighbours and a compact table.
 `RADELTA_CONTEXT_MEAN_SIGNS` additionally conditions on the left/upper ordering,
-using larger tables that can improve compression ratio at a speed cost. Both
+using larger tables for finer conditioning at a speed cost. Both
 mean modes use left and upper neighbours on the first plane of each block.
 
 Lossy compression additionally uses:
@@ -132,16 +136,16 @@ it detects interleaving or revisiting previously read data. Its default
 decoded-data budget is 2 GiB per open handle, grown on demand, with at most
 128 entries. Call
 `radelta_file_set_cache_limit(handle, max_bytes)` to change this budget. Zero
-restores the original single-entry cache. One oversized entry is always allowed;
+selects a single-entry cache. One oversized entry is always allowed;
 this is a retention budget, not a cap on the decoder's total working memory.
 Rust callers can use `RadeltaFileHandle::set_cache_limit(bytes)`.
 
 Rust exporters can query `decode_unit_info(t,c,z)` for a stored unit's key,
 starting Z, depth and compressed size, then call `decode_unit(t,c,z)` to obtain
 owned Z,Y,X pixels without inserting them into the retention cache. Keys are
-local to one open handle. Concurrent calls share the existing Rayon pool;
+local to one open handle. Concurrent calls share the Rayon pool;
 the handle lock covers payload reads, not codec work. Callers control the
-number and lifetime of these owned buffers. The C ABI is unchanged.
+number and lifetime of these owned buffers.
 
 ## Streaming writer
 

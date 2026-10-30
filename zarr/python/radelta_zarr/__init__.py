@@ -10,5 +10,5 @@ _register_zarr_codec(CODEC_ID, RadeltaCodec)
 
 __version__ = VERSION
 
-# Imported after codec registration so existing Radelta stores can be opened.
+# Register codecs before importing store-access helpers.
 from .ome import create_ome_image, repack, write_image  # noqa: E402,F401

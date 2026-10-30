@@ -1,6 +1,6 @@
 //! Damaged dimension headers must produce ordinary errors, never a process
-//! abort from an impossible allocation. Regression tests for fuzzing cases in
-//! which a corrupted X dimension requested hundreds of gigabytes.
+//! abort from an impossible allocation. Corrupted dimensions can request
+//! hundreds of gigabytes and must be checked against the stored payload.
 
 use radelta_native::{decompress_u16_nd, RadeltaFileHandle};
 use std::{fs, fs::File, path::Path, process::Command};

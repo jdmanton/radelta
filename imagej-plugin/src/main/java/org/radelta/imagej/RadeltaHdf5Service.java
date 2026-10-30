@@ -7,7 +7,7 @@ import org.scijava.plugin.Plugin;
 import org.scijava.service.AbstractService;
 import org.scijava.service.Service;
 
-/** Configure existing Fiji HDF5 import commands when its context starts. */
+/** Configure Fiji HDF5 import commands when its context starts. */
 @Plugin(type = Service.class)
 public class RadeltaHdf5Service extends AbstractService {
     @Parameter(required = false)

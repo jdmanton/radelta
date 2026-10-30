@@ -84,11 +84,11 @@ struct ChunkSegment {
 }
 
 /// Budget for retaining decoded volumes/chunks across interleaved plane reads.
-/// A single oversized entry is still retained, as in the original reader.
+/// A single entry larger than the retention budget is permitted.
 pub const DEFAULT_FILE_CACHE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 128;
 // Additional decoded pixels plus compressed payloads admitted by one batch.
-// Codec scratch and the existing retention cache are separate; one oversized
+// Codec scratch and the retention cache are separate; one oversized
 // unit must always be able to proceed.
 const BATCH_WORKING_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -121,7 +121,7 @@ impl PixelCache {
             if let Some((previous, previous_z)) = self.last_read {
                 if previous != key {
                     // Same-Z channel switches are the common Fiji case.
-                    // Revisiting an older key also enables caching for less
+                    // Revisiting a requested key also enables caching for less
                     // regular browsing, with bounded bookkeeping.
                     if previous_z == z || self.recent_keys.contains(&key) {
                         self.reuse_detected = true;
@@ -139,7 +139,7 @@ impl PixelCache {
     }
     fn prepare_read(&mut self, bytes: usize) {
         // A first sequential pass has no reuse between entries. Preserve the
-        // original single-entry memory footprint until reuse is observed.
+        // single-entry memory footprint until reuse is observed.
         if !self.reuse_detected {
             while !self.entries.is_empty() {
                 self.evict_oldest();
@@ -157,7 +157,7 @@ impl PixelCache {
         }
     }
     // Evict before allocating another decoded volume, rather than allowing
-    // old cached data to inflate the decoder's peak working set.
+    // retained cached data to inflate the decoder's peak working set.
     fn prepare(&mut self, bytes: usize) {
         while !self.entries.is_empty()
             && (self.entries.len() >= MAX_CACHE_ENTRIES
@@ -380,7 +380,7 @@ fn wait_chunk(
         .map_err(|_| "compression worker disconnected")?
 }
 
-/// Divide the existing approximate working budget between encode slots.
+/// Divide the approximate working budget between encode slots.
 /// Four raw-chunk sizes per slot cover input buffers,
 /// completed payloads and an estimate of codec working memory. Recycle each
 /// completed input into the feeder. Keep enough codec blocks in a chunk to
@@ -890,9 +890,9 @@ impl RadeltaFileHandle {
         }
     }
 
-    /// Set the decoded volume/chunk retention budget in bytes. Zero restores
-    /// the original single-entry cache. This does not cap decoder working
-    /// memory: one oversized entry is always allowed, as before.
+    /// Set the decoded volume/chunk retention budget in bytes. Zero selects
+    /// a single-entry cache. This does not cap decoder working memory:
+    /// one entry larger than the retention budget is permitted.
     pub fn set_cache_limit(&self, bytes: usize) -> std::result::Result<(), String> {
         let mut backing = self
             .backing
@@ -976,7 +976,7 @@ impl RadeltaFileHandle {
     /// once per call, using the current Rayon pool across independent units as
     /// well as codec blocks. Additional in-flight pixels and compressed payloads
     /// are bounded to 256 MiB per call, except for one oversized unit. The cache
-    /// budget is unchanged. On a decode/I/O error, output may be partly written.
+    /// budget is separate. On a decode/I/O error, output may be partly written.
     pub fn read_planes(
         &self,
         planes: &[(usize, usize, usize)],
@@ -1540,7 +1540,7 @@ pub unsafe extern "C" fn radelta_file_get_info(
     RADELTA_OK
 }
 
-/// Set the decoded retention budget. Zero selects the original single-entry cache.
+/// Set the decoded retention budget. Zero selects a single-entry cache.
 ///
 /// # Safety
 /// `handle` must be a live file handle returned by `radelta_file_open`.
@@ -2553,7 +2553,7 @@ mod tests {
 
     #[test]
     fn concurrent_cold_plane_and_batch_reads_finish_in_small_pools() {
-        // Run behind a timeout so a lock/pool regression fails instead of
+        // Run behind a timeout so a lock/pool deadlock fails instead of
         // hanging the entire test suite. The worker owns all borrowed data.
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {

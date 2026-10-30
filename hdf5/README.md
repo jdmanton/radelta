@@ -1,12 +1,12 @@
 # Radelta compression for HDF5
 
-This plugin stores ordinary chunked HDF5 datasets using Radelta 0.9.2.
+This plugin compresses ordinary chunked HDF5 datasets with Radelta.
 Each chunk contains an RDL1/RDM2 lossless or RDLQ/RDQ2 calibrated-lossy stream.
 HDF5 handles indexing, metadata and partial reads; the filter only encodes pixels.
 The Rust codec is linked into the plugin, so readers do not need a separate
-Radelta shared library. Existing Radelta formats and the TIFF CLI are unchanged.
+Radelta shared library.
 
-Supported datasets are unsigned 16-bit integers in either byte order. Rank
+Supported datasets are unsigned 8-bit or 16-bit integers in either byte order. Rank
 2, 3, 4 and 5 mean `YX`, `ZYX`, `CZYX` and `TCZYX`, respectively. Insert singleton
 axes where needed: a time series without channels is `T,1,Z,Y,X`. Contexts
 never cross T/C boundaries, even when a chunk contains multiple volumes.
@@ -20,7 +20,7 @@ The [HDF5 builds workflow](../.github/workflows/hdf5-build.yml) produces
 Windows x86-64, Linux x86-64/ARM64 and macOS Intel/Apple Silicon packages.
 The read/write SDK ZIP includes the matching shared HDF5 runtime and is tested
 after relocation. The [complete Fiji bundle](FIJI.md) includes the decoder in
-the existing ImageJ JAR and supplies the HDF5_Vibez/JHDF5 importer dependencies.
+the ImageJ JAR and supplies the HDF5_Vibez/JHDF5 importer dependencies.
 A standalone decoder ZIP is also available for other native HDF5 readers.
 See [download and use prebuilt packages](ONLINE_BUILDS.md). Tagged releases
 attach the packages automatically; manual Actions runs do not require a new tag.
@@ -35,12 +35,12 @@ The wheel supports Python 3.9+, Windows x86-64, macOS 11+ on Intel/Apple Silicon
 and Linux x86-64/ARM64 with glibc 2.34+. For example, on Windows:
 
 ```powershell
-python -m pip install .\radelta_hdf5-0.9.2-py3-none-win_amd64.whl
+python -m pip install .\radelta_hdf5-<version>-py3-none-win_amd64.whl
 ```
 
 The CLI and Python examples below work without `--plugin-path` or
 `configure_plugin` when the bundled wheel is installed. Explicit directories
-remain available for custom SDK builds. The following build instructions are
+are available for custom SDK builds. The following build instructions are
 for the SDK filter and native HDF5 applications.
 
 Requires Rust 1.98.0, CMake 3.18+, a C compiler and HDF5 development files
@@ -124,8 +124,8 @@ with h5py.File("acquisition.h5", "w") as f:
 ```
 
 The default chunk chooser targets at most 8 MiB of raw pixels and uses T/C
-extents of one. Larger chunks can improve compression by reducing probability
-table overhead; smaller XY tiles reduce read amplification for small regions.
+extents of one. Larger chunks amortise probability-table overhead; smaller XY
+tiles reduce read amplification for small regions.
 The raw chunk size must be smaller than 4 GiB. The codec runs its usual parallel
 block processing inside each chunk; HDF5 ordinarily invokes filters serially.
 One-pass allocating C encoding avoids compressing twice to size a buffer.
@@ -134,7 +134,7 @@ Memory is bounded by the current chunk and codec workspace, plus HDF5 caches.
 ## File conversion
 
 The companion `radelta-hdf5` CLI is installed with `pip install ./hdf5/python`.
-It is separate from the existing `radelta` TIFF/rdlt CLI. `python -m radelta_hdf5`
+It is separate from the `radelta` TIFF/rdlt CLI. `python -m radelta_hdf5`
 can also be used. `--plugin-path` and `--filter-id` are global options, before
 the subcommand; omit `--plugin-path` if `HDF5_PLUGIN_PATH` is already set.
 
@@ -147,7 +147,7 @@ radelta-hdf5 --plugin-path hdf5/build/plugins repack existing.h5 compressed.h5 -
 
 TIFF import infers tifffile axes and converts page order to canonical axes.
 Plain multipage stacks become ZYX; `--axes TZCYX` can override source axes.
-Import supports a single series of grayscale uint16 YX pages, including
+Import supports a single series of grayscale uint8 or uint16 YX pages, including
 ImageJ/OME page stacks. Volumetric pages, RGB and multiple series are rejected.
 It processes one chunk at a time, decoding at most one complete TIFF plane
 at a time. XY tiling can require repeated TIFF page reads. Export writes a
@@ -164,10 +164,11 @@ write through a temporary file. Existing outputs require `--overwrite`.
 
 ## BigDataViewer export
 
-The `bdv` command writes standard BDV XML/HDF5 from a grayscale uint16 TIFF
-series or one HDF5 dataset. Each channel becomes a separate setup and each
-timepoint is preserved. Both lossless and calibrated-lossy exports use the
-existing Radelta filter; BDV reads tiles through its normal HDF5 loader.
+The `bdv` command writes standard BDV XML/HDF5 from a grayscale uint8 or uint16
+TIFF series or one uint16 HDF5 dataset. Each channel becomes a separate setup,
+and each timepoint is preserved. Output levels use uint16 datasets. Both
+lossless and calibrated-lossy exports use the Radelta filter; BDV reads tiles
+through its normal HDF5 loader.
 
 ```sh
 radelta-hdf5 --plugin-path hdf5/build/plugins bdv input.tif sample.xml
@@ -265,7 +266,7 @@ Invalid datatypes/options cause dataset creation to fail. The plugin converts
 its filter to mandatory during creation, including h5py custom filters, so an
 encoding error cannot silently skip compression or lossy quantisation. Even
 incompressible chunks remain valid Radelta streams, using raw pixel blocks
-when entropy coding would not save space. Tiny chunks still include stream and
+when entropy coding would not save space. Tiny chunks include stream and
 block framing. Raw and entropy-coded blocks use the same version-1 format;
 HDF5's filter mask is not used to bypass lossy quantisation. Missing plugins
 cause compressed reads to fail.
@@ -297,12 +298,17 @@ Zero parameters select lossless defaults. `set_local` appends X,Y,Z,C,T chunk
 extents (indices 11–15, omitted axes become one) and byte order (16: 0 little,
 1 big). These local parameters are derived from the dataset, not supplied chunk
 geometry. The embedded build used by Fiji has no `set_local` callback, since it
-makes no HDF5 calls: it encodes only datasets created with all 17 words,
-as the ImageJ plugin and Python `create_dataset` helper do, and fails writes
-otherwise. Python wheels use this embedded build; use the helper to create
+makes no HDF5 calls: it encodes only datasets created with the complete local
+parameters (17 words for uint16 or 18 for uint8), as the ImageJ plugin and
+Python `create_dataset` helper do, and fails writes otherwise. Python wheels use this embedded build; use the helper to create
 mandatory-filter datasets rather than passing incomplete parameters to h5py
 directly. Each chunk uses the
-current checksummed Radelta lossless or calibrated-lossy stream format.
+checksummed Radelta lossless or calibrated-lossy stream format.
+
+For uint8 datasets, index 17 stores sample width `1`; uint16 datasets use 17
+words and a two-byte sample width. The filter widens byte samples for encoding
+and restores the dataset dtype on decoding. Lossy uint8 reconstructions are
+saturated at 255.
 
 ## Tests
 
