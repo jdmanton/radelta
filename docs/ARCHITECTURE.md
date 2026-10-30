@@ -26,7 +26,12 @@ use the types and functions re-exported at the crate root.
 | [`codec/encode.rs`](../native/src/codec/encode.rs) | Single-volume encoding |
 | [`codec/decode.rs`](../native/src/codec/decode.rs) | Single-volume parsing, validation and decoding |
 | [`container.rs`](../native/src/container.rs) | TCZYX containers of independent volumes |
-| [`file_api.rs`](../native/src/file_api.rs) | Indexed file reads, decoded cache, streaming writer and file C ABI |
+| [`file_api/mod.rs`](../native/src/file_api/mod.rs) | File-handle types and Rust API exports |
+| [`file_api/index.rs`](../native/src/file_api/index.rs) | File opening, header validation and stored-unit indexing |
+| [`file_api/cache.rs`](../native/src/file_api/cache.rs) | Adaptive decoded-data retention |
+| [`file_api/reader.rs`](../native/src/file_api/reader.rs) | Single-plane, batch and owned-unit reads |
+| [`file_api/writer.rs`](../native/src/file_api/writer.rs) | Streaming encode queue, chunk writes and publication |
+| [`file_api/ffi.rs`](../native/src/file_api/ffi.rs) | File and streaming-writer C ABI |
 | [`ffi.rs`](../native/src/ffi.rs) | In-memory C ABI |
 | [`metadata.rs`](../native/src/metadata.rs) | Application metadata storage |
 | [`main.rs`](../native/src/main.rs) and [`cli.rs`](../native/src/cli.rs) | TIFF conversion, command dispatch and argument parsing |
@@ -89,6 +94,13 @@ use one table per worker, and a single worker uses one batch.
 The file/cache mutex protects file reads and cache bookkeeping. Decoding takes
 place outside it: a reader must not hold this mutex while waiting for Rayon
 work that may itself need access to the same file.
+
+The reader scopes that mutex around payload reads and cache operations. The
+cache module owns retention policy and accounting; the index module validates
+containers and maps requested coordinates to stored units. The writer owns its
+encode queue and output, and joins pending work before finishing or dropping.
+File C bindings validate caller buffers and report thread-local errors while
+delegating reads and writes to the Rust implementation.
 
 ## File indexing and plane access
 
