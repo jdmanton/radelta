@@ -164,7 +164,7 @@ fn read_sample_plane_into(
     if tiff_io::read_raw_sample_plane(dec, plane, sample)? {
         return Ok(());
     }
-    if tiff_io::read_u8_tiled_sample(dec, plane, sample)? {
+    if tiff_io::read_tiled_sample(dec, plane, sample)? {
         return Ok(());
     }
     let chunk_type = dec.get_chunk_type();

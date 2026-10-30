@@ -19,7 +19,7 @@ CLI = os.environ.get("RADELTA_CLI", str(
 
 
 @unittest.skipIf(TIFF_SKIP_REASON is not None, TIFF_SKIP_REASON or "")
-class Uint8TiffTests(unittest.TestCase):
+class TiffTests(unittest.TestCase):
     def run_cli(self, *args):
         # This integration matrix deliberately reuses its temporary outputs.
         result = subprocess.run([CLI, "--force", *map(str, args)], capture_output=True)
@@ -78,6 +78,60 @@ class Uint8TiffTests(unittest.TestCase):
                 actual = tifffile.imread(restored)
                 self.assertEqual(actual.dtype, np.uint8)
                 np.testing.assert_array_equal(actual, expected)
+
+    @unittest.skipUnless(Path(CLI).is_file(), "Build the CLI or set RADELTA_CLI")
+    def test_tiled_samples_preserve_pixels_byte_order_and_predictors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for dtype in ("u1", "u2"):
+                data = (np.arange(2*3*17*19, dtype="u4") * 317).astype(dtype).reshape(2, 3, 17, 19)
+                for order in ("<", ">"):
+                    for planar in (False, True):
+                        source_data = data if planar else data[:, 0]
+                        expected = data.transpose(1, 0, 2, 3) if planar else source_data
+                        for compression, predictor in ((None, None), ("packbits", None),
+                                                       ("deflate", None), ("deflate", 2),
+                                                       ("lzw", None), ("lzw", 2)):
+                            source, encoded, restored = root / "input.tif", root / "image.rdlt", root / "restored.tif"
+                            tifffile.imwrite(source, source_data, byteorder=order, tile=(16, 16),
+                                             compression=compression, predictor=predictor,
+                                             photometric="minisblack", metadata=None,
+                                             planarconfig="separate" if planar else None)
+                            for stream in (False, True):
+                                with self.subTest(dtype=dtype, order=order, planar=planar,
+                                                  compression=compression, predictor=predictor, stream=stream):
+                                    self.run_cli("encode", source, encoded,
+                                                 *(["--stream", "--memory-mib", "1"] if stream else []))
+                                    self.run_cli("decode", encoded, restored)
+                                    actual = tifffile.imread(restored)
+                                    self.assertEqual(actual.dtype, data.dtype)
+                                    np.testing.assert_array_equal(actual, expected)
+
+    @unittest.skipUnless(Path(CLI).is_file(), "Build the CLI or set RADELTA_CLI")
+    def test_lzw_tiled_pyramids_preserve_every_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for dtype in ("u1", "u2"):
+                data = (np.arange(2*17*19, dtype="u4") * 317).astype(dtype).reshape(2, 17, 19)
+                level = data[:, ::2, ::2]
+                for order in ("<", ">"):
+                    for predictor in (None, 2):
+                        source, encoded, restored = root / "input.tif", root / "image.rdlt", root / "restored.tif"
+                        common = dict(photometric="minisblack", tile=(16, 16), compression="lzw",
+                                      predictor=predictor, metadata=None)
+                        with tifffile.TiffWriter(source, byteorder=order) as writer:
+                            writer.write(data, subifds=1, **common)
+                            writer.write(level, subfiletype=1, **common)
+                        for stream in (False, True):
+                            with self.subTest(dtype=dtype, order=order, predictor=predictor, stream=stream):
+                                self.run_cli("encode", source, encoded, *(["--stream"] if stream else []))
+                                self.run_cli("decode", encoded, restored)
+                                with tifffile.TiffFile(restored) as result:
+                                    for z, page in enumerate(result.pages):
+                                        np.testing.assert_array_equal(page.asarray(), data[z])
+                                        self.assertEqual(len(page.pages), 1)
+                                        self.assertEqual(page.pages[0].dtype, data.dtype)
+                                        np.testing.assert_array_equal(page.pages[0].asarray(), level[z])
 
 
 if __name__ == "__main__":

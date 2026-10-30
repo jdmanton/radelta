@@ -28,5 +28,23 @@
       "scale_bits": 10
     },
     "generator": "Radelta Rust API with block_depth=2 and default context/precision"
+  },
+  "planar_u16_lzw_tiles.tif": {
+    "sha256": "3817e133eb85b794605d2576cfe9c0182e89ae7ac26a46cb34162a895d66a762",
+    "dims": {
+      "x": 19,
+      "y": 17,
+      "z": 2,
+      "c": 3,
+      "t": 1
+    },
+    "format": "little-endian classic TIFF",
+    "compression": "LZW",
+    "planar_configuration": "separate",
+    "tile": [
+      16,
+      16
+    ],
+    "generator": "NumPy uint16 pixels and tifffile with imagecodecs; see README.md"
   }
 }

@@ -113,18 +113,19 @@ fn strip_table<R: Read + Seek>(dec: &mut Decoder<R>, tag: Tag) -> Result<Vec<u64
     }
 }
 
-/// Read byte tiles with a full tile-width stride, then crop the padding.
-/// Besides avoiding row-wise padding copies, this avoids the TIFF LZW
-/// reader's repeated short-read/end-code issue on padded byte tiles.
-pub fn read_u8_tiled_sample<R: Read + Seek>(
+/// Decode unsigned tiles with a full tile-width stride, then crop the padding.
+/// Reading complete tile rows avoids the TIFF LZW reader's short-read/end-code
+/// issue when the decoder skips horizontal padding between visible rows.
+pub fn read_tiled_sample<R: Read + Seek>(
     dec: &mut Decoder<R>,
     out: &mut [u16],
     sample: usize,
 ) -> Result<bool, String> {
     use tiff::decoder::ChunkType;
-    if dec.get_chunk_type() != ChunkType::Tile || sample_bytes(dec)? != 1 {
+    if dec.get_chunk_type() != ChunkType::Tile {
         return Ok(false);
     }
+    let bytes_per_sample = sample_bytes(dec)?;
     let (w, h) = dec.dimensions().map_err(|e| e.to_string())?;
     let (w, h) = (w as usize, h as usize);
     if w.checked_mul(h) != Some(out.len()) {
@@ -135,6 +136,9 @@ pub fn read_u8_tiled_sample<R: Read + Seek>(
     if tw == 0 || th == 0 {
         return Err("invalid TIFF tile dimensions".into());
     }
+    let row_bytes = tw
+        .checked_mul(bytes_per_sample)
+        .ok_or("TIFF tile row size overflow")?;
     let across = w.div_ceil(tw);
     let per_plane = across
         .checked_mul(h.div_ceil(th))
@@ -148,25 +152,37 @@ pub fn read_u8_tiled_sample<R: Read + Seek>(
     for k in 0..per_plane {
         let index =
             u32::try_from(sample * per_plane + k).map_err(|_| "TIFF tile index overflow")?;
-        dec.read_chunk_to_buffer(&mut buffer, index, tw)
+        dec.read_chunk_to_buffer(&mut buffer, index, row_bytes)
             .map_err(|e| e.to_string())?;
-        let DecodingResult::U8(pixels) = &buffer else {
-            return Err("expected uint8 TIFF tiles".into());
-        };
         let x0 = k % across * tw;
         let y0 = k / across * th;
         let width = tw.min(w - x0);
         let height = th.min(h - y0);
-        if pixels.len() < (height - 1) * tw + width {
-            return Err("truncated TIFF tile".into());
-        }
-        for row in 0..height {
-            for (dst, &src) in out[(y0 + row) * w + x0..(y0 + row) * w + x0 + width]
-                .iter_mut()
-                .zip(&pixels[row * tw..row * tw + width])
-            {
-                *dst = u16::from(src);
+        let needed = (height - 1) * tw + width;
+        match &buffer {
+            DecodingResult::U8(pixels) => {
+                if pixels.len() < needed {
+                    return Err("truncated TIFF tile".into());
+                }
+                for row in 0..height {
+                    for (dst, &src) in out[(y0 + row) * w + x0..(y0 + row) * w + x0 + width]
+                        .iter_mut()
+                        .zip(&pixels[row * tw..row * tw + width])
+                    {
+                        *dst = u16::from(src);
+                    }
+                }
             }
+            DecodingResult::U16(pixels) => {
+                if pixels.len() < needed {
+                    return Err("truncated TIFF tile".into());
+                }
+                for row in 0..height {
+                    out[(y0 + row) * w + x0..(y0 + row) * w + x0 + width]
+                        .copy_from_slice(&pixels[row * tw..row * tw + width]);
+                }
+            }
+            _ => return Err("expected uint8 or uint16 TIFF tiles".into()),
         }
     }
     Ok(true)
@@ -177,7 +193,7 @@ pub fn read_plane<R: Read + Seek>(dec: &mut Decoder<R>, out: &mut [u16]) -> Resu
     if read_raw_sample_plane(dec, out, 0)? {
         return Ok(());
     }
-    if read_u8_tiled_sample(dec, out, 0)? {
+    if read_tiled_sample(dec, out, 0)? {
         return Ok(());
     }
     match dec.read_image().map_err(|e| e.to_string())? {
