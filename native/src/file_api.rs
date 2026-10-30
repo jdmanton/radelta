@@ -7,11 +7,14 @@
 //! compressed chunk containing a requested plane is decoded.
 
 use super::{
-    choose_stream_chunk_depth, compress_lossy_u16, compress_u16, decompress_u16_expecting,
-    inspect_dims, Dims, Dims5, LossyOptions, Options, Reader, DEFAULT_BLOCK_DEPTH,
-    DEFAULT_STREAM_MEMORY_MIB, LOSSY_VERSION, MAGIC, MAGIC_LOSSY, MAGIC_ND, MAGIC_ND_LOSSY,
-    ND_VERSION, RADELTA_CODEC_ERROR, RADELTA_INVALID_ARGUMENT, RADELTA_OK, STREAM_MAGIC_LOSSLESS,
-    STREAM_MAGIC_LOSSY, STREAM_VERSION, VERSION,
+    choose_stream_chunk_depth, compress_lossy_u16, compress_u16, inspect_dims, Dims, Dims5,
+    LossyOptions, Options, DEFAULT_BLOCK_DEPTH, DEFAULT_STREAM_MEMORY_MIB, RADELTA_CODEC_ERROR,
+    RADELTA_INVALID_ARGUMENT, RADELTA_OK, STREAM_MAGIC_LOSSLESS, STREAM_MAGIC_LOSSY,
+    STREAM_VERSION,
+};
+use crate::codec::decompress_u16_expecting;
+use crate::format::{
+    Reader, LOSSY_VERSION, MAGIC, MAGIC_LOSSY, MAGIC_ND, MAGIC_ND_LOSSY, ND_VERSION, VERSION,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -2358,14 +2361,14 @@ mod tests {
             let mut decoded = vec![0u16; dims.x * dims.y];
             handle.read_plane(0, 0, z, &mut decoded).unwrap();
             for (&input, &output) in source.iter().zip(decoded.iter()) {
-                let q = crate::lossy_quantize(
+                let q = crate::codec::lossy_quantize(
                     input,
                     opts.offset_adu,
                     opts.gain_e_per_adu,
                     opts.noise_step,
                 );
                 assert!(q <= u8::MAX as u16);
-                let expected = crate::lossy_reconstruct(
+                let expected = crate::codec::lossy_reconstruct(
                     q as u8,
                     opts.offset_adu,
                     opts.gain_e_per_adu,

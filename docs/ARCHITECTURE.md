@@ -9,6 +9,35 @@ sample width for reconstruction.
 See the [format specification](FORMAT.md) for serialized fields and the
 [C API](C_API.md) for buffer ownership and calling conventions.
 
+## Source map
+
+The native library exposes its Rust API through
+[`lib.rs`](../native/src/lib.rs). Implementation modules are private; callers
+use the types and functions re-exported at the crate root.
+
+| Source | Responsibility |
+| --- | --- |
+| [`types.rs`](../native/src/types.rs) | Options, dimensions, errors and statistics |
+| [`format.rs`](../native/src/format.rs) | Container identifiers, byte fields and checksums |
+| [`codec/transform.rs`](../native/src/codec/transform.rs) | Integer square roots and calibrated quantisation |
+| [`codec/context.rs`](../native/src/codec/context.rs) | Causal spatial contexts |
+| [`codec/model.rs`](../native/src/codec/model.rs) | Probability models, normalization and model serialization |
+| [`codec/block.rs`](../native/src/codec/block.rs) | Histograms and rANS block kernels |
+| [`codec/encode.rs`](../native/src/codec/encode.rs) | Single-volume encoding |
+| [`codec/decode.rs`](../native/src/codec/decode.rs) | Single-volume parsing, validation and decoding |
+| [`container.rs`](../native/src/container.rs) | TCZYX containers of independent volumes |
+| [`file_api.rs`](../native/src/file_api.rs) | Indexed file reads, decoded cache, streaming writer and file C ABI |
+| [`ffi.rs`](../native/src/ffi.rs) | In-memory C ABI |
+| [`metadata.rs`](../native/src/metadata.rs) | Application metadata storage |
+| [`main.rs`](../native/src/main.rs) and [`cli.rs`](../native/src/cli.rs) | TIFF conversion, command dispatch and argument parsing |
+
+Unit tests sit beside the implementation they exercise.
+[`codec/tests.rs`](../native/src/codec/tests.rs) covers stream round trips and
+corruption handling across codec components; `native/tests` covers the public
+API and CLI. Probability models, contexts and pixel transforms supply the block
+kernels; volume encoders and decoders combine those kernels with byte framing.
+The multidimensional and file APIs compose these independent volume streams.
+
 ## Pixel codec
 
 Each channel/timepoint volume is independent, and each volume contains
